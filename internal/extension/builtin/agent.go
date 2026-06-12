@@ -5,6 +5,7 @@ import (
 	"context"
 	"log/slog"
 
+	"github.com/km269/wukong/internal/config"
 	"github.com/km269/wukong/internal/provider"
 	"github.com/km269/wukong/internal/util"
 
@@ -17,7 +18,8 @@ import (
 
 // AgentToolSet provides wrapped sub-agents as tools.
 // This enables the main agent to delegate tasks to expert
-// sub-agents via standard tool calls.
+// sub-agents via standard tool calls, with streaming support
+// for real-time user feedback.
 type AgentToolSet struct {
 	tools     []tool.Tool
 	subAgents []agent.Agent
@@ -31,9 +33,20 @@ type AgentToolSet struct {
 //
 // The sub-agents use a shared model and lightweight configuration
 // optimized for single-turn expert tasks.
+//
+// When agentCfg.AgentToolsStream is true, sub-agent responses are
+// streamed to the user in real-time via WithStreamInner(true).
+// When agentCfg.AgentToolsEnabled is false, an empty toolset is
+// returned.
 func NewAgentToolSet(
 	factory *provider.Factory,
+	agentCfg *config.AgentConfig,
 ) *AgentToolSet {
+	if !agentCfg.AgentToolsEnabled {
+		util.Logger.Info("agent_toolset: disabled by config")
+		return &AgentToolSet{}
+	}
+
 	mdl, err := factory.CreateDefaultModel()
 	if err != nil {
 		util.Logger.Warn("agent_toolset: failed to create model for sub-agents",
@@ -82,18 +95,46 @@ func NewAgentToolSet(
 		llmagent.WithMaxLLMCalls(2),
 	)
 
-	ts.subAgents = []agent.Agent{codeReviewer, summarizer}
+	// Code Generator: specialized sub-agent for writing code
+	codeGenerator := llmagent.New("code-generator",
+		llmagent.WithModel(mdl),
+		llmagent.WithDescription("Expert code generator that writes "+
+			"clean, production-quality code"),
+		llmagent.WithInstruction(
+			"You are an expert code generator. Write clean, well-structured, "+
+				"production-quality code. Include proper error handling, "+
+				"documentation, and tests. Follow the language's best practices. "+
+				"Return only the code with minimal explanation.",
+		),
+		llmagent.WithGenerationConfig(model.GenerationConfig{
+			MaxTokens:   intPtr(4096),
+			Temperature: float64Ptr(0.2),
+			Stream:      false,
+		}),
+		llmagent.WithMaxLLMCalls(3),
+	)
 
+	ts.subAgents = []agent.Agent{codeReviewer, summarizer, codeGenerator}
+
+	// Wrap each sub-agent as a callable tool.
+	// WithStreamInner: forward sub-agent events to parent (for TUI streaming).
+	// WithResponseModeFinalOnly: only return the final complete message,
+	//   avoiding intermediate planning/reasoning noise in tool results.
+	streamInner := agentCfg.AgentToolsStream
 	for _, ag := range ts.subAgents {
 		t := agenttool.NewTool(ag,
 			agenttool.WithSkipSummarization(false),
-			agenttool.WithStreamInner(false),
+			agenttool.WithStreamInner(streamInner),
+			agenttool.WithResponseMode(
+				agenttool.ResponseModeFinalOnly,
+			),
 		)
 		ts.tools = append(ts.tools, t)
 	}
 
 	util.Logger.Info("agent_toolset: registered sub-agent tools",
-		slog.Int("count", len(ts.tools)))
+		slog.Int("count", len(ts.tools)),
+		slog.Bool("streaming", streamInner))
 
 	return ts
 }

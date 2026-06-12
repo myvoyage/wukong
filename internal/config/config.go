@@ -107,14 +107,29 @@ type WukongConfig struct {
 	// Skill configures the tRPC Agent Skill repository system.
 	Skill SkillConfig `mapstructure:"skill"`
 
+	// Knowledge configures the RAG knowledge retrieval system.
+	Knowledge KnowledgeConfig `mapstructure:"knowledge"`
+
 	// Workflow configures multi-mode agent orchestration.
 	Workflow WorkflowConfig `mapstructure:"workflow"`
 
 	// A2AServer configures the local A2A protocol server.
 	A2AServer A2AServerConfig `mapstructure:"a2a_server"`
 
+	// AGUI configures the AG-UI SSE server for web-based chat UIs.
+	AGUI AGUIConfig `mapstructure:"agui"`
+
 	// Telemetry configures OpenTelemetry observability.
 	Telemetry TelemetryConfig `mapstructure:"telemetry"`
+
+	// Eval configures the evaluation/regression testing system.
+	Eval EvalConfig `mapstructure:"eval"`
+
+	// Artifact configures artifact storage backend settings.
+	ArtifactConfig ArtifactConfig `mapstructure:"artifact"`
+
+	// Observability configures enhanced observability (Langfuse, etc.).
+	Observability ObservabilityConfig `mapstructure:"observability"`
 }
 
 // ============================================================================
@@ -175,6 +190,18 @@ type ExtensionConfig struct {
 	// all remote tools directly. Useful when connecting to many MCP
 	// servers to keep the tool list manageable.
 	MCPBroker bool `mapstructure:"mcp_broker"`
+	// MCPToolFilter specifies which tools to include from the MCP server.
+	// When empty, all tools are included. Supports glob patterns.
+	MCPToolFilter []string `mapstructure:"mcp_tool_filter"`
+	// MCPToolExclude specifies which tools to exclude from the MCP server.
+	// Supports glob patterns.
+	MCPToolExclude []string `mapstructure:"mcp_tool_exclude"`
+	// MCPSessionReconnect enables automatic session reconnection on
+	// connection loss (SSE/streamable transports). Default: false.
+	MCPSessionReconnect bool `mapstructure:"mcp_session_reconnect"`
+	// MCPSessionReconnectAttempts is the max reconnection attempts.
+	// Default: 3.
+	MCPSessionReconnectAttempts int `mapstructure:"mcp_session_reconnect_attempts"`
 }
 
 // ToolPermission defines allow/deny for a specific tool within an extension.
@@ -237,8 +264,29 @@ type AgentConfig struct {
 	// when tool_search_enabled is true. Default: 20.
 	ToolSearchMaxTools int `mapstructure:"tool_search_max_tools"`
 	// ContextCompaction enables automatic truncation of tool results to prevent
-	// context window overflow. Frame-aware for structured results.
+	// context window overflow. When enabled, two-pass compaction is applied:
+	//   Pass 1: Replace old (non-recent) oversized tool results with a placeholder.
+	//   Pass 2: Truncate head+tail of any remaining oversized tool results.
+	// Default: false.
 	ContextCompaction bool `mapstructure:"context_compaction"`
+	// ContextCompactionToolResultMaxTokens is the token threshold for Pass 1
+	// (placeholder replacement of old tool results). Default: 1024.
+	ContextCompactionToolResultMaxTokens int `mapstructure:"context_compaction_tool_result_max_tokens"`
+	// ContextCompactionOversizedMaxTokens is the token threshold for Pass 2
+	// (head+tail truncation of remaining large results). When 0, Pass 2 is
+	// disabled. Recommended: 8192. Default: 0.
+	ContextCompactionOversizedMaxTokens int `mapstructure:"context_compaction_oversized_max_tokens"`
+	// ContextCompactionKeepRecentRequests controls how many recent requests
+	// are protected from Pass 1 placeholder replacement. Default: 1.
+	ContextCompactionKeepRecentRequests int `mapstructure:"context_compaction_keep_recent"`
+	// ContextCompactionForceCleanTools lists tool names whose results are
+	// always placeholderized (even in recent requests). Useful for noisy
+	// tools like shell/grep that produce large output.
+	ContextCompactionForceCleanTools []string `mapstructure:"context_compaction_force_clean_tools"`
+	// ContextCompactionKeepTools lists tool names whose results are
+	// NEVER placeholderized in Pass 1. Useful for memory/session tools
+	// that contain critical information.
+	ContextCompactionKeepTools []string `mapstructure:"context_compaction_keep_tools"`
 	// SessionRecallEnabled enables cross-session context preloading.
 	// When enabled, previous session context is injected into the system
 	// prompt via tRPC's PreloadSessionRecall mechanism.
@@ -250,6 +298,22 @@ type AgentConfig struct {
 	// in tool call arguments. Useful for models that occasionally produce
 	// malformed JSON (e.g., single-quoted keys, trailing commas).
 	JSONRepairEnabled bool `mapstructure:"json_repair_enabled"`
+	// TodoToolEnabled enables the tRPC-native todo_write tool for
+	// structured task tracking across conversation turns. Tasks are
+	// persisted in Session state. Default: true.
+	TodoToolEnabled bool `mapstructure:"todo_tool_enabled"`
+	// TodoEnforcerEnabled enables the todo enforcer extension that
+	// ensures all pending todos are completed before the agent
+	// provides its final answer. Default: true.
+	TodoEnforcerEnabled bool `mapstructure:"todo_enforcer_enabled"`
+	// AgentToolsEnabled enables the AgentToolSet that wraps specialized
+	// sub-agents (code-reviewer, summarizer, etc.) as tools callable
+	// by the main agent. Default: true.
+	AgentToolsEnabled bool `mapstructure:"agent_tools_enabled"`
+	// AgentToolsStream enables streaming output from sub-agent tool
+	// calls. When enabled, sub-agent responses are streamed to the
+	// user in real-time. Default: false.
+	AgentToolsStream bool `mapstructure:"agent_tools_stream"`
 }
 
 // ============================================================================
@@ -303,10 +367,12 @@ type SecurityConfig struct {
 // ============================================================================
 
 // SessionConfig defines conversation history storage settings.
+// Supports backends: sqlite (default), memory, redis.
 type SessionConfig struct {
-	// Backend is the storage backend: sqlite | memory.
+	// Backend is the storage backend: sqlite | memory | redis.
 	Backend string `mapstructure:"backend"`
 	// DBPath is the SQLite database file path (shared pool).
+	// Only used when backend="sqlite".
 	DBPath string `mapstructure:"db_path"`
 	// EventLimit is the maximum events retained per session.
 	EventLimit int `mapstructure:"event_limit"`
@@ -316,6 +382,10 @@ type SessionConfig struct {
 	EnableSummary bool `mapstructure:"enable_summary"`
 	// SummaryTrigger is the event count threshold to trigger summarization.
 	SummaryTrigger int `mapstructure:"summary_trigger"`
+	// RedisURL is the Redis connection URL for backend="redis".
+	// Format: redis://[user:pass@]host:port[/db].
+	// Example: "redis://localhost:6379/0".
+	RedisURL string `mapstructure:"redis_url"`
 }
 
 // MemoryConfig defines long-term knowledge persistence settings.
@@ -349,11 +419,24 @@ type MemoryConfig struct {
 }
 
 // TodoConfig defines task tracking storage settings.
+// Supports two modes:
+//   - Custom SQLite-backed tools: todo_create, todo_update, todo_list,
+//     todo_complete, todo_delete (for detailed task management).
+//   - tRPC-native todo_write tool + todoenforcer: session-persisted,
+//     enforces task completion before final answer (simpler, recommended).
+// Both can run simultaneously.
 type TodoConfig struct {
-	// Backend is the storage backend: sqlite | memory.
+	// Backend is the storage backend for custom todo tools: sqlite | memory.
 	Backend string `mapstructure:"backend"`
-	// DBPath is the SQLite database file path.
+	// DBPath is the SQLite database file path for custom todo tools.
 	DBPath string `mapstructure:"db_path"`
+	// EnableNativeTodo enables the tRPC-native todo_write tool that
+	// persists tasks in Session state. Default: true.
+	EnableNativeTodo bool `mapstructure:"enable_native_todo"`
+	// EnableEnforcer enables the todoenforcer extension that checks
+	// all pending todos are complete before the agent gives its
+	// final answer. Requires EnableNativeTodo=true. Default: true.
+	EnableEnforcer bool `mapstructure:"enable_enforcer"`
 }
 
 // RecallConfig defines cross-session chat history search settings.
@@ -538,6 +621,44 @@ type SkillConfig struct {
 }
 
 // ============================================================================
+// Knowledge/RAG Configuration
+// ============================================================================
+
+// KnowledgeConfig defines settings for the Retrieval-Augmented Generation
+// (RAG) knowledge base system. Supports document loading from local files
+// and URLs, with vector-based semantic search.
+type KnowledgeConfig struct {
+	// Enabled enables the knowledge base system. Default: false.
+	Enabled bool `mapstructure:"enabled"`
+	// EmbedderProvider is the provider name for generating embeddings.
+	// Uses an OpenAI-compatible API. Typical value: "openai".
+	// If empty, the default provider is used (same as LLM).
+	EmbedderProvider string `mapstructure:"embedder_provider"`
+	// EmbedderModel is the embedding model name.
+	// Default: "text-embedding-3-small" (1536 dimensions).
+	EmbedderModel string `mapstructure:"embedder_model"`
+	// Sources lists document source directories to load at startup.
+	// Each path is recursively scanned for supported formats
+	// (txt, md, pdf, csv, json, docx).
+	Sources []string `mapstructure:"sources"`
+	// SourceURLs lists document source URLs to fetch and index.
+	SourceURLs []string `mapstructure:"source_urls"`
+	// VectorStore is the vector store backend: "inmemory" (default).
+	// Inmemory is suitable for small-to-medium knowledge bases.
+	VectorStore string `mapstructure:"vector_store"`
+	// MaxResults limits search results per query. Default: 5.
+	MaxResults int `mapstructure:"max_results"`
+	// EnableSourceSync enables automatic re-indexing when source files
+	// change. Default: false (manual reload only).
+	EnableSourceSync bool `mapstructure:"enable_source_sync"`
+	// ReRanker enables result re-ranking. Default: false.
+	ReRankerEnabled bool `mapstructure:"reranker_enabled"`
+	// SearchToolName is the tool name registered to the agent.
+	// Default: "knowledge_search".
+	SearchToolName string `mapstructure:"search_tool_name"`
+}
+
+// ============================================================================
 // Workflow & A2A Server Configuration
 // ============================================================================
 
@@ -579,6 +700,92 @@ type A2AServerConfig struct {
 	AgentName string `mapstructure:"agent_name"`
 	// AgentDescription describes the agent for A2A discovery.
 	AgentDescription string `mapstructure:"agent_description"`
+}
+
+// ============================================================================
+// AG-UI Server Configuration
+// ============================================================================
+
+// AGUIConfig defines settings for the AG-UI SSE server that exposes
+// agent conversations to web-based chat UIs. Compatible with AG-UI
+// protocol clients (CopilotKit, TDesign Chat, etc.).
+type AGUIConfig struct {
+	// Enabled starts the AG-UI SSE server. Default: false.
+	Enabled bool `mapstructure:"enabled"`
+	// Address is the listen address (e.g., ":8080").
+	// Default: ":8080".
+	Address string `mapstructure:"address"`
+	// Path is the SSE chat endpoint path.
+	// Default: "/agui".
+	Path string `mapstructure:"path"`
+}
+
+// ============================================================================
+// Evaluation Configuration
+// ============================================================================
+
+// EvalConfig defines settings for the agent evaluation and regression
+// testing system.
+type EvalConfig struct {
+	// Enabled enables automatic evaluation runs. Default: false.
+	Enabled bool `mapstructure:"enabled"`
+	// EvalSetPath is the path to the JSON evalset file.
+	// Default: ".wukong_evals/default.evalset.json".
+	EvalSetPath string `mapstructure:"evalset_path"`
+	// ResultsPath is the output path for evaluation results JSON.
+	// Default: ".wukong_evals/results.json".
+	ResultsPath string `mapstructure:"results_path"`
+	// Metrics lists the evaluation metrics to apply.
+	Metrics []EvalMetricConfig `mapstructure:"metrics"`
+}
+
+// EvalMetricConfig defines a single evaluation metric.
+type EvalMetricConfig struct {
+	// Name is the metric identifier: tool_trajectory_match,
+	// response_contains_pattern, response_min_length,
+	// response_not_empty.
+	Name string `mapstructure:"name"`
+	// Threshold is the minimum score (0.0-1.0) to pass.
+	Threshold float64 `mapstructure:"threshold"`
+}
+
+// ============================================================================
+// Artifact Configuration
+// ============================================================================
+
+// ArtifactConfig defines artifact storage settings for named, versioned
+// binary data (images, documents, generated files).
+type ArtifactConfig struct {
+	// Backend is the storage backend: "inmemory" (default), "cos".
+	Backend string `mapstructure:"backend"`
+	// COSBucketURL is the Tencent COS bucket URL for backend="cos".
+	// Format: "https://bucket.cos.region.myqcloud.com".
+	COSBucketURL string `mapstructure:"cos_bucket_url"`
+	// COSSecretID is the Tencent Cloud SecretId (or env COS_SECRETID).
+	COSSecretID string `mapstructure:"cos_secret_id"`
+	// COSSecretKey is the Tencent Cloud SecretKey
+	// (or env COS_SECRETKEY).
+	COSSecretKey string `mapstructure:"cos_secret_key"`
+}
+
+// ============================================================================
+// Observability Configuration
+// ============================================================================
+
+// ObservabilityConfig defines enhanced observability settings including
+// Langfuse LLM tracing and Prometheus metrics.
+type ObservabilityConfig struct {
+	// LangfuseEnabled enables Langfuse OTLP tracing. Default: false.
+	LangfuseEnabled bool `mapstructure:"langfuse_enabled"`
+	// LangfuseHost is the Langfuse host (without http://).
+	// Default: from env LANGFUSE_HOST.
+	LangfuseHost string `mapstructure:"langfuse_host"`
+	// LangfusePublicKey is the Langfuse public key.
+	// Default: from env LANGFUSE_PUBLIC_KEY.
+	LangfusePublicKey string `mapstructure:"langfuse_public_key"`
+	// LangfuseSecretKey is the Langfuse secret key.
+	// Default: from env LANGFUSE_SECRET_KEY.
+	LangfuseSecretKey string `mapstructure:"langfuse_secret_key"`
 }
 
 // ============================================================================
@@ -768,9 +975,16 @@ func (l *Loader) setDefaults() {
 	l.v.SetDefault("agent.tool_search_enabled", false)
 	l.v.SetDefault("agent.tool_search_max_tools", 20)
 	l.v.SetDefault("agent.context_compaction", false)
+	l.v.SetDefault("agent.context_compaction_tool_result_max_tokens", 1024)
+	l.v.SetDefault("agent.context_compaction_oversized_max_tokens", 0)
+	l.v.SetDefault("agent.context_compaction_keep_recent", 1)
 	l.v.SetDefault("agent.session_recall_enabled", false)
 	l.v.SetDefault("agent.session_recall_limit", 5)
 	l.v.SetDefault("agent.json_repair_enabled", false)
+	l.v.SetDefault("agent.todo_tool_enabled", true)
+	l.v.SetDefault("agent.todo_enforcer_enabled", true)
+	l.v.SetDefault("agent.agent_tools_enabled", true)
+	l.v.SetDefault("agent.agent_tools_stream", false)
 
 	// --- Security defaults ---
 	l.v.SetDefault("security.malware_scan_enabled", true)
@@ -802,6 +1016,8 @@ func (l *Loader) setDefaults() {
 	// --- Todo defaults ---
 	l.v.SetDefault("todo.backend", "sqlite")
 	l.v.SetDefault("todo.db_path", "wukong.db")
+	l.v.SetDefault("todo.enable_native_todo", true)
+	l.v.SetDefault("todo.enable_enforcer", true)
 
 	// --- Recall defaults ---
 	l.v.SetDefault("recall.enabled", true)
@@ -862,6 +1078,15 @@ func (l *Loader) setDefaults() {
 	l.v.SetDefault("skill.auto_load", true)
 	l.v.SetDefault("skill.max_skills", 20)
 
+	// --- Knowledge defaults ---
+	l.v.SetDefault("knowledge.enabled", false)
+	l.v.SetDefault("knowledge.embedder_model", "text-embedding-3-small")
+	l.v.SetDefault("knowledge.vector_store", "inmemory")
+	l.v.SetDefault("knowledge.max_results", 5)
+	l.v.SetDefault("knowledge.enable_source_sync", false)
+	l.v.SetDefault("knowledge.reranker_enabled", false)
+	l.v.SetDefault("knowledge.search_tool_name", "knowledge_search")
+
 	// --- Workflow defaults ---
 	l.v.SetDefault("workflow.mode", "single")
 	l.v.SetDefault("workflow.max_iterations", 10)
@@ -872,6 +1097,24 @@ func (l *Loader) setDefaults() {
 	l.v.SetDefault("a2a_server.agent_name", "wukong")
 	l.v.SetDefault("a2a_server.agent_description",
 		"Wukong AI Agent - A2A service endpoint")
+
+	// --- AG-UI defaults ---
+	l.v.SetDefault("agui.enabled", false)
+	l.v.SetDefault("agui.address", ":8080")
+	l.v.SetDefault("agui.path", "/agui")
+
+	// --- Eval defaults ---
+	l.v.SetDefault("eval.enabled", false)
+	l.v.SetDefault("eval.evalset_path",
+		".wukong_evals/default.evalset.json")
+	l.v.SetDefault("eval.results_path",
+		".wukong_evals/results.json")
+
+	// --- Artifact defaults ---
+	l.v.SetDefault("artifact.backend", "inmemory")
+
+	// --- Observability defaults ---
+	l.v.SetDefault("observability.langfuse_enabled", false)
 
 	// --- Telemetry defaults ---
 	l.v.SetDefault("telemetry.enabled", false)

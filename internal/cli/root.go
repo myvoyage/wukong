@@ -52,6 +52,7 @@ Built with tRPC-Agent-Go, tRPC-MCP-Go and tRPC-A2A-Go.`,
 	cmd.AddCommand(newVersionCmd())
 	cmd.AddCommand(newExtensionCmd())
 	cmd.AddCommand(newCompletionCmd())
+	cmd.AddCommand(newEvalCmd())
 
 	return cmd
 }

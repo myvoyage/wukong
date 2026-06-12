@@ -37,6 +37,8 @@ func NewSessionService(
 		return &SessionService{
 			Service: newInMemoryService(cfg),
 		}, nil
+	case "redis":
+		return newRedisService(cfg)
 	default:
 		return nil, fmt.Errorf(
 			"unsupported session backend: %s", cfg.Backend,
@@ -108,4 +110,25 @@ func newInMemoryService(cfg *config.SessionConfig) session.Service {
 		opts = append(opts, sessioninmemory.WithSessionTTL(cfg.TTL))
 	}
 	return sessioninmemory.NewSessionService(opts...)
+}
+
+// newRedisService creates a Redis-backed session service.
+func newRedisService(cfg *config.SessionConfig) (*SessionService, error) {
+	redisURL := cfg.RedisURL
+	if redisURL == "" {
+		redisURL = "redis://localhost:6379/0"
+	}
+
+	var opts []RedisOption
+	opts = append(opts, WithRedisEventLimit(cfg.EventLimit))
+	if cfg.TTL > 0 {
+		opts = append(opts, WithRedisSessionTTL(cfg.TTL))
+	}
+
+	svc, err := NewRedisSessionService(redisURL, opts...)
+	if err != nil {
+		return nil, fmt.Errorf("create redis session: %w", err)
+	}
+
+	return &SessionService{Service: svc}, nil
 }

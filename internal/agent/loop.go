@@ -38,6 +38,7 @@ import (
 	"trpc.group/trpc-go/trpc-agent-go/runner"
 	"trpc.group/trpc-go/trpc-agent-go/session"
 	"trpc.group/trpc-go/trpc-agent-go/tool"
+	todotool "trpc.group/trpc-go/trpc-agent-go/tool/todo"
 )
 
 // tracerName is the OpenTelemetry tracer name for the agent package.
@@ -47,13 +48,15 @@ const tracerName = "wukong/agent"
 // It orchestrates the Runner, Session, Memory, and Tool systems
 // to provide a Goose-like agent experience.
 type CoreLoop struct {
-	runner      runner.Runner
-	factory     *provider.Factory
-	cfg         *config.WukongConfig
-	contextMgr  *ContextManager
-	security    *security.Guard
-	recallStore *recall.Store
-	closeFn     func() error
+	agent          agent.Agent
+	runner         runner.Runner
+	sessionService session.Service
+	factory        *provider.Factory
+	cfg            *config.WukongConfig
+	contextMgr     *ContextManager
+	security       *security.Guard
+	recallStore    *recall.Store
+	closeFn        func() error
 
 	mu     sync.RWMutex
 	closed bool
@@ -93,6 +96,15 @@ func NewCoreLoop(cfg CoreLoopConfig) (*CoreLoop, error) {
 	// Collect all tools
 	var allTools []tool.Tool
 	allTools = append(allTools, cfg.FunctionTools...)
+
+	// Add tRPC-native todo_write tool for structured task tracking.
+	// Tasks persist in Session state and survive across conversation turns.
+	// Uses session.State (temp: prefix) per invocation branch for isolation.
+	if cfg.Config.Agent.TodoToolEnabled {
+		todoTool := todotool.New()
+		allTools = append(allTools, todoTool)
+		util.Logger.Info("todo_write tool enabled (tRPC-native, session-persisted)")
+	}
 
 	// Create the agent based on workflow mode
 	var ag agent.Agent
@@ -207,6 +219,24 @@ func NewCoreLoop(cfg CoreLoopConfig) (*CoreLoop, error) {
 		}
 	}
 
+	// Configure Todo Enforcer plugin.
+	// When enabled, the enforcer checks that all pending todos are
+	// completed before the agent delivers its final answer. This
+	// ensures the agent doesn't forget incomplete subtasks.
+	//
+	// Since tRPC-Agent-Go v1.10.0 does not yet ship an official
+	// todoenforcer extension, we use a lightweight in-house
+	// implementation as a runner plugin.
+	if cfg.Config.Agent.TodoEnforcerEnabled &&
+		cfg.Config.Agent.TodoToolEnabled {
+		runnerOpts = append(runnerOpts,
+			runner.WithPlugins(newTodoEnforcer()),
+		)
+		util.Logger.Info(
+			"todoenforcer plugin enabled (requires all todos completed)",
+		)
+	}
+
 	r := runner.NewRunner("wukong-app", ag, runnerOpts...)
 
 	// Create context manager
@@ -229,12 +259,14 @@ func NewCoreLoop(cfg CoreLoopConfig) (*CoreLoop, error) {
 	}
 
 	loop := &CoreLoop{
-		runner:      r,
-		factory:     cfg.Factory,
-		cfg:         cfg.Config,
-		contextMgr:  ctxMgr,
-		security:    guard,
-		recallStore: cfg.RecallStore,
+		agent:          ag,
+		runner:         r,
+		sessionService: cfg.SessionService,
+		factory:        cfg.Factory,
+		cfg:            cfg.Config,
+		contextMgr:     ctxMgr,
+		security:       guard,
+		recallStore:    cfg.RecallStore,
 		closeFn: func() error {
 			var errs []error
 			// 1. Close memory service first — stops auto-extract
@@ -486,6 +518,16 @@ func (l *CoreLoop) GetRunner() runner.Runner {
 	return l.runner
 }
 
+// GetAgent returns the underlying agent for A2A server usage.
+func (l *CoreLoop) GetAgent() agent.Agent {
+	return l.agent
+}
+
+// GetSessionService returns the session service for external usage.
+func (l *CoreLoop) GetSessionService() session.Service {
+	return l.sessionService
+}
+
 // GetSecurityGuard returns the security guard.
 func (l *CoreLoop) GetSecurityGuard() *security.Guard {
 	return l.security
@@ -610,6 +652,47 @@ func createSingleAgent(
 		agentOpts = append(agentOpts,
 			llmagent.WithEnableContextCompaction(true),
 		)
+		// Pass 1: Replace old oversized tool results with placeholder.
+		// Default threshold is 1024 tokens if not configured.
+		if cfg.Config.Agent.ContextCompactionToolResultMaxTokens > 0 {
+			agentOpts = append(agentOpts,
+				llmagent.WithContextCompactionToolResultMaxTokens(
+					cfg.Config.Agent.ContextCompactionToolResultMaxTokens,
+				),
+			)
+		}
+		// Pass 2: Truncate head+tail of remaining large tool results.
+		// Only active when explicitly configured (recommended: 8192).
+		if cfg.Config.Agent.ContextCompactionOversizedMaxTokens > 0 {
+			agentOpts = append(agentOpts,
+				llmagent.WithContextCompactionOversizedToolResultMaxTokens(
+					cfg.Config.Agent.ContextCompactionOversizedMaxTokens,
+				),
+			)
+		}
+		// Protect recent requests from Pass 1 placeholder replacement.
+		if cfg.Config.Agent.ContextCompactionKeepRecentRequests > 0 {
+			agentOpts = append(agentOpts,
+				llmagent.WithContextCompactionKeepRecentRequests(
+					cfg.Config.Agent.ContextCompactionKeepRecentRequests,
+				),
+			)
+		}
+		// Per-tool compaction configuration: force-clean noisy tools,
+		// exclude critical tools from compaction.
+		if len(cfg.Config.Agent.ContextCompactionForceCleanTools) > 0 ||
+			len(cfg.Config.Agent.ContextCompactionKeepTools) > 0 {
+			tcc := &llmagent.ToolResultCompactionConfig{}
+			if len(cfg.Config.Agent.ContextCompactionForceCleanTools) > 0 {
+				tcc.ForceCleanToolNames = cfg.Config.Agent.ContextCompactionForceCleanTools
+			}
+			if len(cfg.Config.Agent.ContextCompactionKeepTools) > 0 {
+				tcc.KeepToolNames = cfg.Config.Agent.ContextCompactionKeepTools
+			}
+			agentOpts = append(agentOpts,
+				llmagent.WithToolResultCompactionConfig(tcc),
+			)
+		}
 	}
 
 	// Session recall: inject previous session context

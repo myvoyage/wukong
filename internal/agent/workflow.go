@@ -531,6 +531,20 @@ func (b *WorkflowBuilder) createSpecializedAgent(
 		opts = append(opts,
 			llmagent.WithEnableContextCompaction(true),
 		)
+		if b.cfg.Agent.ContextCompactionToolResultMaxTokens > 0 {
+			opts = append(opts,
+				llmagent.WithContextCompactionToolResultMaxTokens(
+					b.cfg.Agent.ContextCompactionToolResultMaxTokens,
+				),
+			)
+		}
+		if b.cfg.Agent.ContextCompactionOversizedMaxTokens > 0 {
+			opts = append(opts,
+				llmagent.WithContextCompactionOversizedToolResultMaxTokens(
+					b.cfg.Agent.ContextCompactionOversizedMaxTokens,
+				),
+			)
+		}
 	}
 
 	return llmagent.New(name, opts...)

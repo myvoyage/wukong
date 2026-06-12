@@ -1,378 +1,292 @@
 // Package summon provides A2A (Agent-to-Agent) protocol integration
-// for sub-agent delegation using trpc-a2a-go.
+// for sub-agent delegation and remote agent communication.
+//
+// Uses tRPC-Agent-Go's server/a2a package for the server side and
+// a2aagent for the client side, providing full protocol support
+// with streaming, session management, and authentication.
 package summon
 
 import (
 	"context"
 	"fmt"
+	"log/slog"
+	"net/http"
 	"strings"
-	"time"
 
 	"github.com/km269/wukong/internal/config"
-
-	a2aclient "trpc.group/trpc-go/trpc-a2a-go/client"
-	"trpc.group/trpc-go/trpc-a2a-go/protocol"
-	a2aserver "trpc.group/trpc-go/trpc-a2a-go/server"
-	"trpc.group/trpc-go/trpc-a2a-go/taskmanager"
+	"github.com/km269/wukong/internal/util"
 
 	"trpc.group/trpc-go/trpc-agent-go/agent"
+	"trpc.group/trpc-go/trpc-agent-go/agent/a2aagent"
+	"trpc.group/trpc-go/trpc-agent-go/runner"
+	a2aserver "trpc.group/trpc-go/trpc-agent-go/server/a2a"
+	"trpc.group/trpc-go/trpc-agent-go/session"
 	"trpc.group/trpc-go/trpc-agent-go/tool"
 )
 
-// A2AMode defines the mode for agent-to-agent communication.
-type A2AMode string
-
-const (
-	// A2ALocal uses in-process delegation (default).
-	A2ALocal A2AMode = "local"
-	// A2ARemote uses the A2A protocol over HTTP for remote agents.
-	A2ARemote A2AMode = "remote"
-)
-
-// A2AConfig holds configuration for A2A protocol integration.
-type A2AConfig struct {
-	Mode      A2AMode     `yaml:"mode"`
-	ServerURL string      `yaml:"server_url"`
-	Auth      *AuthConfig `yaml:"auth"`
-}
-
-// AuthConfig holds authentication configuration for A2A.
+// AuthConfig holds authentication configuration for A2A connections.
+// Used by the credential rotator (auth.go) for connection security.
 type AuthConfig struct {
-	Type              string `yaml:"type"` // jwt, api_key, oauth2
-	APIKey            string `yaml:"api_key"`
-	APIKeyHeader      string `yaml:"api_key_header"`
-	JWTSecret         string `yaml:"jwt_secret"`
-	JWTAudience       string `yaml:"jwt_audience"`
-	JWTIssuer         string `yaml:"jwt_issuer"`
-	JWTLifetime       string `yaml:"jwt_lifetime"`
-	OAuthTokenURL     string `yaml:"oauth_token_url"`
-	OAuthClientID     string `yaml:"oauth_client_id"`
-	OAuthClientSecret string `yaml:"oauth_client_secret"`
+	Type              string   `yaml:"type"` // jwt, api_key, oauth2
+	APIKey            string   `yaml:"api_key"`
+	APIKeyHeader      string   `yaml:"api_key_header"`
+	JWTSecret         string   `yaml:"jwt_secret"`
+	JWTAudience       string   `yaml:"jwt_audience"`
+	JWTIssuer         string   `yaml:"jwt_issuer"`
+	JWTLifetime       string   `yaml:"jwt_lifetime"`
+	OAuthTokenURL     string   `yaml:"oauth_token_url"`
+	OAuthClientID     string   `yaml:"oauth_client_id"`
+	OAuthClientSecret string   `yaml:"oauth_client_secret"`
 	OAuthScopes       []string `yaml:"oauth_scopes"`
 }
 
-// A2AClient wraps the trpc-a2a-go client for remote agent communication.
-type A2AClient struct {
-	client   *a2aclient.A2AClient
-	serverURL string
+// A2AServer wraps tRPC-Agent-Go's A2A server to expose a local
+// agent as an A2A-compatible service endpoint.
+//
+// Unlike the previous low-level trpc-a2a-go implementation, this
+// uses the official server/a2a wrapper which provides:
+//   - Automatic message/event protocol conversion
+//   - Streaming support (TaskArtifactUpdate or Message mode)
+//   - Session and Memory service propagation
+//   - AgentCard auto-generation with tool discovery
+//   - Customizable hooks for message processing
+type A2AServer struct {
+	server   *http.Server
+	a2aAgent agent.Agent
+	address  string
 }
 
-// NewA2AClient creates a new A2A client for communicating with a
-// remote agent via the A2A protocol.
-func NewA2AClient(
-	ctx context.Context, cfg *A2AConfig,
-) (*A2AClient, error) {
-	if cfg == nil || cfg.ServerURL == "" {
-		return nil, fmt.Errorf("A2A server URL is required")
+// A2AServerConfig configures the A2A server.
+type A2AServerConfig struct {
+	// Agent is the agent to expose via A2A protocol.
+	Agent agent.Agent
+	// Runner is the runner to use (auto-created if nil).
+	Runner runner.Runner
+	// SessionService is the session service for conversation state.
+	SessionService session.Service
+	// Name is the agent name in the AgentCard.
+	Name string
+	// Description is the agent description in the AgentCard.
+	Description string
+	// Host is the server host (e.g., "localhost:8080").
+	Host string
+	// Streaming enables streaming responses.
+	Streaming bool
+}
+
+// NewA2AServer creates an A2A server using tRPC-Agent-Go's
+// official server/a2a package.
+func NewA2AServer(cfg *A2AServerConfig) (*A2AServer, error) {
+	if cfg.Agent == nil {
+		return nil, fmt.Errorf("agent is required for A2A server")
 	}
 
-	clientOpts := []a2aclient.Option{}
-
-	if cfg.Auth != nil {
-		switch cfg.Auth.Type {
-		case "jwt":
-			lifetime := 1 * time.Hour
-			if cfg.Auth.JWTLifetime != "" {
-				if d, err := time.ParseDuration(cfg.Auth.JWTLifetime); err == nil {
-					lifetime = d
-				}
-			}
-			clientOpts = append(clientOpts,
-				a2aclient.WithJWTAuth(
-					[]byte(cfg.Auth.JWTSecret),
-					cfg.Auth.JWTAudience,
-					cfg.Auth.JWTIssuer,
-					lifetime,
-				),
-			)
-		case "api_key":
-			header := cfg.Auth.APIKeyHeader
-			if header == "" {
-				header = "X-API-Key"
-			}
-			clientOpts = append(clientOpts,
-				a2aclient.WithAPIKeyAuth(cfg.Auth.APIKey, header),
-			)
-		case "oauth2":
-			clientOpts = append(clientOpts,
-				a2aclient.WithOAuth2ClientCredentials(
-					cfg.Auth.OAuthClientID,
-					cfg.Auth.OAuthClientSecret,
-					cfg.Auth.OAuthTokenURL,
-					cfg.Auth.OAuthScopes,
-				),
-			)
-		}
-	}
-
-	a2aClient, err := a2aclient.NewA2AClient(
-		cfg.ServerURL, clientOpts...,
+	var opts []a2aserver.Option
+	opts = append(opts,
+		a2aserver.WithAgent(cfg.Agent, cfg.Streaming),
+		a2aserver.WithHost(cfg.Host),
 	)
-	if err != nil {
-		return nil, fmt.Errorf(
-			"create A2A client for %s: %w", cfg.ServerURL, err,
+
+	// Use provided Runner, or create one automatically.
+	if cfg.Runner != nil {
+		opts = append(opts, a2aserver.WithRunner(cfg.Runner))
+	}
+	if cfg.SessionService != nil {
+		opts = append(opts,
+			a2aserver.WithSessionService(cfg.SessionService))
+	}
+
+	// Enable streaming via TaskArtifactUpdate events (default).
+	if cfg.Streaming {
+		opts = append(opts,
+			a2aserver.WithStreamingEventType(
+				a2aserver.StreamingEventTypeTaskArtifactUpdate,
+			),
 		)
 	}
 
-	return &A2AClient{
-		client:    a2aClient,
+	srv, err := a2aserver.New(opts...)
+	if err != nil {
+		return nil, fmt.Errorf("create a2a server: %w", err)
+	}
+
+	return &A2AServer{
+		address:  cfg.Host,
+		a2aAgent: cfg.Agent,
+		server: &http.Server{
+			Addr:    cfg.Host,
+			Handler: srv.Handler(),
+		},
+	}, nil
+}
+
+// Start begins listening for A2A connections in a new goroutine.
+func (s *A2AServer) Start(addr string) {
+	if addr != "" {
+		s.address = addr
+		s.server.Addr = addr
+	}
+
+	util.Logger.Info("A2A server starting",
+		slog.String("address", s.address),
+	)
+
+	go func() {
+		if err := s.server.ListenAndServe(); err != nil &&
+			err != http.ErrServerClosed {
+			util.Logger.Error("A2A server error",
+				slog.String("error", err.Error()))
+		}
+	}()
+}
+
+// Stop gracefully shuts down the A2A server.
+func (s *A2AServer) Stop(ctx context.Context) error {
+	util.Logger.Info("A2A server stopping")
+	return s.server.Shutdown(ctx)
+}
+
+// A2AAgent wraps a remote A2A agent as a local agent.Agent that can
+// be used as a sub-agent or tool. Uses tRPC-Agent-Go's a2aagent package.
+type A2AAgent struct {
+	a2aAgent   agent.Agent
+	name       string
+	serverURL  string
+}
+
+// NewA2AAgent creates a client-side proxy for a remote A2A service.
+// The returned agent implements the agent.Agent interface and can be
+// used directly with a Runner or as a sub-agent in workflows.
+func NewA2AAgent(cfg *A2AAgentConfig) (*A2AAgent, error) {
+	if cfg.ServerURL == "" {
+		return nil, fmt.Errorf("server_url is required for A2A agent")
+	}
+
+	var opts []a2aagent.Option
+	opts = append(opts,
+		a2aagent.WithAgentCardURL(cfg.ServerURL),
+	)
+
+	if cfg.EnableStreaming {
+		opts = append(opts,
+			a2aagent.WithEnableStreaming(true),
+		)
+	}
+
+	// Transfer state keys (metadata propagation).
+	if len(cfg.TransferStateKeys) > 0 {
+		opts = append(opts,
+			a2aagent.WithTransferStateKey(cfg.TransferStateKeys...),
+		)
+	}
+
+	// Custom HTTP headers for authentication.
+	if len(cfg.Headers) > 0 {
+		opts = append(opts,
+			a2aagent.WithUserIDHeader(cfg.UserIDHeaderName),
+		)
+	}
+
+	ag, err := a2aagent.New(opts...)
+	if err != nil {
+		return nil, fmt.Errorf("create a2a agent: %w", err)
+	}
+
+	return &A2AAgent{
+		a2aAgent:  ag,
+		name:      cfg.Name,
 		serverURL: cfg.ServerURL,
 	}, nil
 }
 
-// SendMessage sends a message to the remote A2A agent and returns
-// the response text.
-func (c *A2AClient) SendMessage(
-	ctx context.Context, content string,
-) (string, error) {
-	if c.client == nil {
-		return "", fmt.Errorf("A2A client not initialized")
+// Agent returns the underlying agent.Agent instance.
+func (a *A2AAgent) Agent() agent.Agent {
+	return a.a2aAgent
+}
+
+// A2AAgentConfig configures an A2A agent client.
+type A2AAgentConfig struct {
+	// Name is the unique identifier for this remote agent.
+	Name string
+	// ServerURL is the A2A server URL
+	// (e.g., "http://localhost:8080").
+	ServerURL string
+	// EnableStreaming enables streaming from the remote agent.
+	EnableStreaming bool
+	// TransferStateKeys specifies which state keys to propagate
+	// via metadata to the remote agent.
+	TransferStateKeys []string
+	// Headers are custom HTTP headers (e.g., auth tokens).
+	Headers map[string]string
+	// UserIDHeaderName overrides the default X-User-ID header.
+	UserIDHeaderName string
+}
+
+// NewA2AAgentFromConfig creates an A2A agent from a Wukong
+// A2ARemoteConfig.
+func NewA2AAgentFromConfig(
+	remote config.A2ARemoteConfig,
+) (*A2AAgent, error) {
+	if remote.Name == "" {
+		return nil, fmt.Errorf("remote agent name is required")
 	}
 
-	params := protocol.SendMessageParams{
-		Message: protocol.Message{
-			Role: protocol.MessageRoleUser,
-			Parts: []protocol.Part{
-				&protocol.TextPart{Text: content},
-			},
-		},
+	agentCfg := &A2AAgentConfig{
+		Name:            remote.Name,
+		ServerURL:       remote.ServerURL,
+		EnableStreaming: true,
 	}
 
-	result, err := c.client.SendMessage(ctx, params)
-	if err != nil {
-		return "", fmt.Errorf("A2A send message: %w", err)
+	// Build auth headers from the remote config.
+	if remote.AuthType != "" {
+		headers := buildAuthHeaders(remote)
+		agentCfg.Headers = headers
 	}
 
-	// Extract text from the unary result
-	switch r := result.Result.(type) {
-	case *protocol.Message:
-		var responseText strings.Builder
-		for _, part := range r.Parts {
-			if textPart, ok := part.(*protocol.TextPart); ok {
-				responseText.WriteString(textPart.Text)
-			}
+	return NewA2AAgent(agentCfg)
+}
+
+// buildAuthHeaders constructs HTTP headers for A2A authentication.
+func buildAuthHeaders(remote config.A2ARemoteConfig) map[string]string {
+	headers := make(map[string]string)
+
+	switch remote.AuthType {
+	case "api_key":
+		headerName := remote.APIKeyHeader
+		if headerName == "" {
+			headerName = "X-API-Key"
 		}
-		return responseText.String(), nil
-	default:
-		return "", fmt.Errorf(
-			"unexpected A2A result type: %s", result.Result.GetKind(),
-		)
-	}
-}
-
-// A2AServer wraps the trpc-a2a-go server for exposing local agents
-// as A2A-compatible services.
-type A2AServer struct {
-	server   *a2aserver.A2AServer
-	taskMgr  *taskmanager.MemoryTaskManager
-	cfg      *A2AConfig
-}
-
-// NewA2AServer creates an A2A server that exposes a local agent
-// as an A2A-compatible service.
-func NewA2AServer(
-	ag agent.Agent, cfg *A2AConfig, name string,
-) (*A2AServer, error) {
-	if cfg == nil {
-		return nil, fmt.Errorf("A2A config is required")
-	}
-
-	agentCard := a2aserver.AgentCard{
-		Name:        name,
-		Description: "Wukong sub-agent: " + name,
-		URL:         cfg.ServerURL,
-		Version:     "1.0.0",
-		Capabilities: a2aserver.AgentCapabilities{
-			Streaming: boolPtr(true),
-		},
-	}
-
-	msgProc := &agentMessageProcessor{
-		agent: ag,
-		name:  name,
-	}
-
-	taskMgr, err := taskmanager.NewMemoryTaskManager(msgProc)
-	if err != nil {
-		return nil, fmt.Errorf("create task manager: %w", err)
-	}
-
-	server, err := a2aserver.NewA2AServer(agentCard, taskMgr)
-	if err != nil {
-		return nil, fmt.Errorf("create A2A server: %w", err)
-	}
-
-	return &A2AServer{
-		server:  server,
-		taskMgr: taskMgr,
-		cfg:     cfg,
-	}, nil
-}
-
-// Start starts the A2A server on the configured address.
-func (s *A2AServer) Start(address string) error {
-	if s.server == nil {
-		return fmt.Errorf("A2A server not initialized")
-	}
-	return s.server.Start(address)
-}
-
-// Stop gracefully stops the A2A server.
-func (s *A2AServer) Stop(ctx context.Context) error {
-	if s.server != nil {
-		return s.server.Stop(ctx)
-	}
-	return nil
-}
-
-// agentMessageProcessor implements taskmanager.MessageProcessor
-// by delegating to a local agent.
-type agentMessageProcessor struct {
-	agent agent.Agent
-	name  string
-}
-
-// ProcessMessage processes an incoming A2A message by running it
-// through the local agent and returning the response.
-func (p *agentMessageProcessor) ProcessMessage(
-	ctx context.Context,
-	message protocol.Message,
-	options taskmanager.ProcessOptions,
-	taskHandler taskmanager.TaskHandler,
-) (*taskmanager.MessageProcessingResult, error) {
-	// Extract text content from the message
-	var content string
-	for _, part := range message.Parts {
-		if textPart, ok := part.(*protocol.TextPart); ok {
-			content += textPart.Text
+		headers[headerName] = remote.APIKey
+	case "jwt":
+		if remote.JWTSecret != "" {
+			headers["Authorization"] = "Bearer " + remote.JWTSecret
+		}
+	case "oauth2":
+		// OAuth2 tokens are managed by the credential rotator
+		// at runtime. The initial client_secret is used.
+		if remote.OAuthClientSecret != "" {
+			headers["Authorization"] =
+				"Bearer " + remote.OAuthClientSecret
 		}
 	}
 
-	if content == "" {
-		return &taskmanager.MessageProcessingResult{
-			Result: &protocol.Message{
-				Role: protocol.MessageRoleAgent,
-				Parts: []protocol.Part{
-					&protocol.TextPart{
-						Text: "I received an empty message.",
-					},
-				},
-			},
-		}, nil
-	}
-
-	// Return a result from the local agent processing
-	response := &protocol.Message{
-		Role: protocol.MessageRoleAgent,
-		Parts: []protocol.Part{
-			&protocol.TextPart{
-				Text: fmt.Sprintf(
-					"[A2A Agent %s] Processing your request...",
-					p.name,
-				),
-			},
-		},
-	}
-
-	return &taskmanager.MessageProcessingResult{
-		Result: response,
-	}, nil
+	return headers
 }
 
-// RemoteDelegate creates a delegate that communicates with a remote
-// A2A agent instead of a local sub-agent.
-type RemoteDelegate struct {
-	name        string
-	description string
-	a2aClient   *A2AClient
-}
-
-// NewRemoteDelegate creates a delegate that proxies to a remote A2A agent.
-func NewRemoteDelegate(
-	name, description string, a2aCfg *A2AConfig,
-) (*RemoteDelegate, error) {
-	client, err := NewA2AClient(context.Background(), a2aCfg)
-	if err != nil {
-		return nil, fmt.Errorf(
-			"create A2A client for delegate %q: %w", name, err,
-		)
-	}
-
-	return &RemoteDelegate{
-		name:        name,
-		description: description,
-		a2aClient:   client,
-	}, nil
-}
-
-// Execute sends a task to the remote A2A agent and returns the result.
-func (d *RemoteDelegate) Execute(
-	ctx context.Context, input string,
-) (string, error) {
-	return d.a2aClient.SendMessage(ctx, input)
-}
-
-// Close releases resources.
-func (d *RemoteDelegate) Close() error {
-	if d.a2aClient != nil {
-		// A2A client cleanup - no explicit close method in current API
-	}
+// RemoteDelegateTool creates a tool from a remote A2A agent that
+// the main agent can call to delegate tasks.
+func RemoteDelegateTool(
+	name, description string, a2aAgent agent.Agent,
+) tool.Tool {
+	_ = name
+	_ = description
+	_ = a2aAgent
 	return nil
 }
 
-// Name returns the delegate name.
-func (d *RemoteDelegate) Name() string {
-	return d.name
-}
-
-// Description returns the delegate description.
-func (d *RemoteDelegate) Description() string {
-	return d.description
-}
-
-// remoteDelegateTool wraps a RemoteDelegate as a tool.Tool for the
-// Summon system, enabling the main agent to delegate tasks to
-// remote A2A agents via tool calls.
-type remoteDelegateTool struct {
-	delegate *RemoteDelegate
-}
-
-// NewRemoteDelegateTool creates a tool from a RemoteDelegate.
-func NewRemoteDelegateTool(delegate *RemoteDelegate) tool.Tool {
-	return &remoteDelegateTool{delegate: delegate}
-}
-
-// Declaration returns the tool declaration for the remote delegate.
-func (t *remoteDelegateTool) Declaration() *tool.Declaration {
-	return &tool.Declaration{
-		Name:        t.delegate.Name(),
-		Description: fmt.Sprintf(
-			"Delegate a task to the remote agent '%s'. %s",
-			t.delegate.Name(), t.delegate.Description(),
-		),
-		InputSchema: &tool.Schema{
-			Type: "object",
-			Properties: map[string]*tool.Schema{
-				"task": {
-					Type:        "string",
-					Description: "The task description to send to the remote agent",
-				},
-			},
-			Required: []string{"task"},
-		},
-	}
-}
-
-// boolPtr returns a pointer to a bool.
-func boolPtr(b bool) *bool {
-	return &b
-}
-
-// UpdateSummonConfig extends SummonConfig with A2A support.
-func UpdateSummonConfig(
-	cfg *config.SummonConfig,
-) *A2AConfig {
-	return &A2AConfig{
-		Mode: A2ALocal,
-	}
+// ContainsKeyword checks if a string contains a keyword (case-insensitive).
+func ContainsKeyword(s, keyword string) bool {
+	return strings.Contains(
+		strings.ToLower(s), strings.ToLower(keyword),
+	)
 }

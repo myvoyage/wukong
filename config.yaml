@@ -81,13 +81,32 @@ agent:
   # Tool Search - 自动工具筛选，减少 token 消耗
   tool_search_enabled: false
   # tool_search_max_tools: 20
-  # 上下文压缩 - 自动截断过长的工具结果
-  context_compaction: false
+  # 上下文压缩 - 自动截断过长的工具结果，防止上下文溢出
+  # 启后执行两遍压缩：
+  #   Pass 1: 将旧的超大工具结果替换为占位符 (<阈值结果被替换)
+  #   Pass 2: 对剩余超大结果进行首尾截断
+  context_compaction: true
+  # context_compaction_tool_result_max_tokens: 1024  # Pass 1 阈值
+  # context_compaction_oversized_max_tokens: 8192    # Pass 2 阈值 (0=禁用Pass2)
+  # context_compaction_keep_recent: 1                # 保留最近N个请求
+  # context_compaction_force_clean_tools:            # 强制占位符化的工具
+  #   - "shell"
+  #   - "grep"
+  # context_compaction_keep_tools:                   # 始终保留结果的工具
+  #   - "memory_search"
+  #   - "session_search"
   # Session Recall - 跨会话上下文预加载
   session_recall_enabled: false
   # session_recall_limit: 5
   # JSON Repair - 修复非标准 JSON 工具参数
   json_repair_enabled: false
+  # Todo Tool - tRPC 原生 todo_write 工具，任务在 Session 中持久化
+  todo_tool_enabled: true
+  # Todo Enforcer - 确保所有待办任务完成后才给出最终答案
+  todo_enforcer_enabled: true
+  # Agent Tools - 将子 Agent（code-reviewer, summarizer）包装为可调用工具
+  agent_tools_enabled: true
+  # agent_tools_stream: true  # 启用子Agent结果流式输出
 
 # ---------------------------------------------------------------------------
 # Security - 安全策略与工具权限
@@ -113,6 +132,7 @@ security:
 
 # ---------------------------------------------------------------------------
 # Session - 会话存储配置
+# 支持后端: sqlite (默认), memory, redis
 # ---------------------------------------------------------------------------
 session:
   backend: "sqlite"
@@ -121,6 +141,8 @@ session:
   ttl: "0h"
   enable_summary: true
   summary_trigger: 50
+  # Redis 配置 (仅 backend="redis" 时生效)
+  # redis_url: "redis://localhost:6379/0"
 
 # ---------------------------------------------------------------------------
 # Memory - 长期记忆存储配置
@@ -168,10 +190,17 @@ memory:
 
 # ---------------------------------------------------------------------------
 # Todo - 任务跟踪存储配置
+# 支持两种模式（可同时启用）:
+#   1. 自定义 SQLite 工具: todo_create/todo_update/todo_list/todo_complete/
+#      todo_delete（精细管理，backend 配置其存储）
+#   2. tRPC 原生 todo_write + todoenforcer: 基于 Session 持久化，
+#      强制完成校验（推荐，简单易用，在 agent 段配置）
 # ---------------------------------------------------------------------------
 todo:
   backend: "sqlite"
   db_path: "wukong.db"
+  # enable_native_todo: true   # 启用 tRPC 原生 todo_write 工具
+  # enable_enforcer: true      # 启用 todoenforcer（必须完成所有todo才给最终答案）
 
 # ---------------------------------------------------------------------------
 # Recall - 跨会话对话搜索配置
@@ -276,6 +305,25 @@ skill:
   max_skills: 20
 
 # ---------------------------------------------------------------------------
+# Knowledge - RAG 知识库检索配置
+# ---------------------------------------------------------------------------
+knowledge:
+  enabled: false
+  # Embedding 模型配置 (用于文本向量化)
+  # embedder_provider: "openai"             # Embedding provider 名称
+  embedder_model: "text-embedding-3-small"   # 1536 维向量
+  # 文档源 (支持 txt, md, pdf, csv, json, docx)
+  # sources:
+  #   - "./docs"
+  #   - "./README.md"
+  # source_urls: []                         # URL 远程文档
+  vector_store: "inmemory"                  # 向量存储: inmemory
+  max_results: 5                            # 每次查询返回结果数
+  enable_source_sync: false                 # 源文件变更自动重新索引
+  reranker_enabled: false                   # 结果重排序
+  search_tool_name: "knowledge_search"      # Agent 工具名
+
+# ---------------------------------------------------------------------------
 # Workflow - 多模式 Agent 编排配置
 # ---------------------------------------------------------------------------
 workflow:
@@ -289,12 +337,37 @@ workflow:
 
 # ---------------------------------------------------------------------------
 # A2A Server - 本地 A2A 协议服务配置
+# 使用 tRPC-Agent-Go server/a2a，自动处理协议转换和流式支持
 # ---------------------------------------------------------------------------
 a2a_server:
   enabled: false
   address: ":9090"
   agent_name: "wukong"
   agent_description: "Wukong AI Agent - A2A service endpoint"
+
+# ---------------------------------------------------------------------------
+# AG-UI Server - Web UI SSE 实时对话服务
+# 支持 CopilotKit / TDesign Chat 等 AG-UI 协议客户端
+# ---------------------------------------------------------------------------
+agui:
+  enabled: false
+  address: ":8080"            # 监听地址
+  path: "/agui"               # SSE 端点路径
+
+# ---------------------------------------------------------------------------
+# Eval - 代理评估与回归测试
+# ---------------------------------------------------------------------------
+eval:
+  enabled: false
+  evalset_path: ".wukong_evals/default.evalset.json"     # 测试用例文件
+  results_path: ".wukong_evals/results.json"              # 结果输出
+  # metrics:
+  #   - name: "tool_trajectory_match"
+  #     threshold: 0.8
+  #   - name: "response_not_empty"
+  #     threshold: 1.0
+  #   - name: "response_min_length"
+  #     threshold: 0.5
 
 # ---------------------------------------------------------------------------
 # Extensions - MCP 扩展配置
@@ -308,7 +381,11 @@ extensions: []
 #     args: ["-y", "@anthropic/mcp-server-filesystem", "/tmp"]
 #     enabled: true
 #     timeout: "30s"
-#     mcp_broker: false  # 设为 true 则通过 MCP Broker 按需发现工具
+#     mcp_broker: false     # 设为 true 则通过 MCP Broker 按需发现工具
+#     mcp_tool_filter: []   # 只包含匹配的工具 (glob 模式)
+#     mcp_tool_exclude: []  # 排除匹配的工具 (glob 模式)
+#     mcp_session_reconnect: false            # SSE/Streamable 自动重连
+#     mcp_session_reconnect_attempts: 3       # 最大重连次数
 #
 #   - name: "developer"
 #     type: "builtin"
@@ -325,3 +402,22 @@ telemetry:
   service_version: "1.0.0"
   environment: "development"
   sample_rate: 1.0
+
+# ---------------------------------------------------------------------------
+# Observability - 增强可观测性（Langfuse LLM 追踪）
+# ---------------------------------------------------------------------------
+observability:
+  langfuse_enabled: false
+  # langfuse_host: ""              # Langfuse host (不含 http://)
+  # langfuse_public_key: ""         # Langfuse 公钥
+  # langfuse_secret_key: ""         # Langfuse 密钥
+
+# ---------------------------------------------------------------------------
+# Artifact - 制品存储配置
+# 支持后端: inmemory (默认), cos (腾讯云COS)
+# ---------------------------------------------------------------------------
+artifact:
+  backend: "inmemory"                # inmemory 或 cos
+  # cos_bucket_url: "https://bucket.cos.region.myqcloud.com"
+  # cos_secret_id: "${COS_SECRETID}"    # 或通过 COS_SECRETID 环境变量
+  # cos_secret_key: "${COS_SECRETKEY}"  # 或通过 COS_SECRETKEY 环境变量

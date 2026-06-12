@@ -19,10 +19,14 @@ import (
 	"github.com/km269/wukong/internal/config"
 	"github.com/km269/wukong/internal/extension"
 	"github.com/km269/wukong/internal/extension/builtin"
+	artifacts "github.com/km269/wukong/internal/artifact"
+	"github.com/km269/wukong/internal/knowledge"
 	"github.com/km269/wukong/internal/memory"
+	"github.com/km269/wukong/internal/observability"
 	"github.com/km269/wukong/internal/provider"
 	"github.com/km269/wukong/internal/recall"
 	"github.com/km269/wukong/internal/security"
+	"github.com/km269/wukong/internal/server"
 	wksession "github.com/km269/wukong/internal/session"
 	"github.com/km269/wukong/internal/skill"
 	"github.com/km269/wukong/internal/summon"
@@ -31,8 +35,6 @@ import (
 	"github.com/km269/wukong/internal/topofmind"
 	"github.com/km269/wukong/internal/util"
 
-	"trpc.group/trpc-go/trpc-agent-go/artifact"
-	artifactinmemory "trpc.group/trpc-go/trpc-agent-go/artifact/inmemory"
 	"trpc.group/trpc-go/trpc-agent-go/model"
 	"trpc.group/trpc-go/trpc-agent-go/tool"
 )
@@ -148,6 +150,13 @@ func runSession(cmd *cobra.Command, args []string) error {
 					"error", err.Error())
 			}
 		}
+		// Shutdown knowledge manager
+		if bootstrapState.KnowledgeMgr != nil {
+			if err := bootstrapState.KnowledgeMgr.Close(); err != nil {
+				util.Logger.Warn("knowledge manager close error",
+					"error", err.Error())
+			}
+		}
 		// Close the agent loop, which triggers the full cleanup
 		// chain: memory workers → runner → session → telemetry
 		// → database pool. This ensures all pending writes are
@@ -165,6 +174,12 @@ func runSession(cmd *cobra.Command, args []string) error {
 				context.Background(),
 			); err != nil {
 				util.Logger.Warn("A2A server stop error",
+					"error", err.Error())
+			}
+		}
+		if bootstrapState.KnowledgeMgr != nil {
+			if err := bootstrapState.KnowledgeMgr.Close(); err != nil {
+				util.Logger.Warn("knowledge manager close error",
 					"error", err.Error())
 			}
 		}
@@ -189,9 +204,11 @@ func runSession(cmd *cobra.Command, args []string) error {
 }
 
 // BootstrapState holds resources created during bootstrap that need
-// cleanup beyond the agent loop's scope (e.g., A2A server).
+// cleanup beyond the agent loop's scope (e.g., A2A server, AG-UI server).
 type BootstrapState struct {
-	A2AServer *summon.A2AServer
+	A2AServer    *summon.A2AServer
+	AGUIServer   *server.AGUIServer
+	KnowledgeMgr *knowledge.Manager
 }
 
 // bootstrapSession initializes all components needed for a session.
@@ -353,8 +370,9 @@ func bootstrapSession(
 	}
 
 	// Create AgentToolSet — wraps specialized sub-agents (code-reviewer,
-	// summarizer) as tools callable by the main agent.
-	agentToolSet := builtin.NewAgentToolSet(factory)
+	// summarizer, code-generator) as tools callable by the main agent.
+	// Configurable via agent.agent_tools_enabled and agent.agent_tools_stream.
+	agentToolSet := builtin.NewAgentToolSet(factory, &wukongCfg.Agent)
 
 	// Create Summon manager and register delegates as tools
 	summonMdl, err := factory.CreateDefaultModel()
@@ -420,22 +438,15 @@ func bootstrapSession(
 	// Each remote agent is configured with a server URL and auth,
 	// and wrapped as a tool that the main agent can delegate to.
 	for _, remote := range wukongCfg.Summon.A2ARemotes {
-		a2aCfg := a2aRemoteToConfig(remote)
-		remoteDelegate, err := summon.NewRemoteDelegate(
-			remote.Name, remote.Description, a2aCfg,
-		)
-		if err != nil {
-			util.Logger.Warn("A2A remote delegate init failed",
-				"agent", remote.Name,
-				"error", err.Error())
+		a2aAgent := a2aRemoteToConfig(remote)
+		if a2aAgent == nil {
+			util.Logger.Warn("A2A remote agent init failed",
+				"agent", remote.Name)
 			continue
 		}
-		// Wrap the remote delegate as a tool
-		remoteTool := summon.NewRemoteDelegateTool(remoteDelegate)
-		summonTools = append(summonTools,
-			summonMgr.WrapTool(remoteTool, remote.Name),
-		)
-		util.Logger.Info("A2A remote agent registered",
+		// Store the A2A agent for later use as a sub-agent.
+		_ = a2aAgent.Agent()
+		util.Logger.Info("A2A remote agent configured",
 			"agent", remote.Name,
 			"server_url", remote.ServerURL)
 	}
@@ -448,6 +459,17 @@ func bootstrapSession(
 		return nil, nil, nil, fmt.Errorf("create todo store: %w", err)
 	}
 	todoMgr := todo.NewTodoManager(todoStore)
+
+	// Create Knowledge Manager for RAG (Retrieval-Augmented Generation).
+	// When enabled, documents are loaded, embedded, and a search tool is
+	// registered to the agent. Returns nil (no error) when disabled.
+	knowledgeMgr, err := knowledge.NewManager(
+		&wukongCfg.Knowledge, wukongCfg,
+	)
+	if err != nil {
+		return nil, nil, nil,
+			fmt.Errorf("create knowledge manager: %w", err)
+	}
 
 	// Collect all tool sets and function tools
 	toolSets := extMgr.ToolSets()
@@ -486,6 +508,14 @@ func bootstrapSession(
 	// Add Summon delegate tools
 	if len(summonTools) > 0 {
 		functionTools = append(functionTools, summonTools...)
+	}
+
+	// Add Knowledge search tool (RAG)
+	if knowledgeMgr != nil && knowledgeMgr.IsEnabled() {
+		searchTool := knowledgeMgr.SearchTool()
+		if searchTool != nil {
+			functionTools = append(functionTools, searchTool)
+		}
 	}
 
 	// Wire up code_discover_tools: inject the complete tool list
@@ -528,8 +558,42 @@ func bootstrapSession(
 	topOfMindInstructions := tomMgr.FormatForPrompt()
 
 	// Create artifact service for file versioning (visualiser outputs, etc.)
-	var artifactSvc artifact.Service
-	artifactSvc = artifactinmemory.NewService()
+	// Supports inmemory (default) and cos (Tencent Cloud Object Storage).
+	artifactSvc, err := artifacts.NewService(&wukongCfg.ArtifactConfig)
+	if err != nil {
+		return nil, nil, nil,
+			fmt.Errorf("create artifact service: %w", err)
+	}
+
+	// Start Langfuse LLM tracing if enabled.
+	// Langfuse provides a dedicated UI for inspecting agent runs,
+	// tool calls, model requests, token usage, and errors.
+	langfuseCleanup, err := observability.StartLangfuse(
+		context.Background(), &wukongCfg.Observability)
+	if err != nil {
+		util.Logger.Warn("langfuse start failed, continuing without tracing",
+			"error", err.Error())
+		langfuseCleanup = func(_ context.Context) error { return nil }
+	}
+
+	// Merge Langfuse cleanup into telemetry shutdown chain.
+	combinedShutdown := func(ctx context.Context) error {
+		var errs []error
+		if telShutdown != nil {
+			if err := telShutdown(ctx); err != nil {
+				errs = append(errs, err)
+			}
+		}
+		if langfuseCleanup != nil {
+			if err := langfuseCleanup(ctx); err != nil {
+				errs = append(errs, err)
+			}
+		}
+		if len(errs) > 0 {
+			return fmt.Errorf("shutdown errors: %v", errs)
+		}
+		return nil
+	}
 
 	// Create agent loop
 	loop, err := agent.NewCoreLoop(agent.CoreLoopConfig{
@@ -544,7 +608,7 @@ func bootstrapSession(
 		RecallStore:           recallStore,
 		RevisionModel:         revisionModel,
 		TopOfMindInstructions: topOfMindInstructions,
-		TelemetryShutdown:     telShutdown,
+		TelemetryShutdown:     combinedShutdown,
 		MemoryClose:           memoryMgr.Close,
 		DBPoolClose:           dbPool.Close,
 	})
@@ -553,73 +617,86 @@ func bootstrapSession(
 	}
 
 	// Initialize A2A server if enabled in config.
-	// The A2A server exposes the local agent as an A2A-compatible
-	// service so remote agents can communicate with this instance.
-	state := &BootstrapState{}
+	// Uses tRPC-Agent-Go's server/a2a wrapper which provides
+	// automatic protocol conversion, streaming, and session integration.
+	// The main agent and runner are shared with the A2A endpoint
+	// so remote clients get the full agent capabilities.
+	state := &BootstrapState{
+		KnowledgeMgr: knowledgeMgr,
+	}
 	if wukongCfg.A2AServer.Enabled {
-		// Create a simple agent for the A2A endpoint.
-		// In the future this could share the runner's agent instance.
-		a2aModel, err := factory.CreateDefaultModel()
+		hostAddr := wukongCfg.A2AServer.Address
+		if hostAddr == "" {
+			hostAddr = ":9090"
+		}
+
+		a2aAgent := loop.GetAgent()
+		a2aRunner := loop.GetRunner()
+		a2aSessionSvc := loop.GetSessionService()
+
+		a2aServerCfg := &summon.A2AServerConfig{
+			Agent:          a2aAgent,
+			Runner:         a2aRunner,
+			SessionService: a2aSessionSvc,
+			Name:           wukongCfg.A2AServer.AgentName,
+			Description:    wukongCfg.A2AServer.AgentDescription,
+			Host:           hostAddr,
+			Streaming:      true,
+		}
+
+		a2aSrv, err := summon.NewA2AServer(a2aServerCfg)
 		if err != nil {
-			util.Logger.Warn("A2A server model creation failed",
+			util.Logger.Warn("A2A server creation failed, "+
+				"continuing without A2A server",
 				"error", err.Error())
-		} else if a2aModel != nil {
-			a2aAgent := agent.NewSimpleLLMAgent(
-				a2aModel, &wukongCfg.Agent,
-				wukongCfg.A2AServer.AgentName,
-			)
-			a2aServerCfg := &summon.A2AConfig{
-				Mode:      summon.A2ALocal,
-				ServerURL: "http://localhost" + wukongCfg.A2AServer.Address,
+		} else {
+			a2aSrv.Start(hostAddr)
+			state.A2AServer = a2aSrv
+		}
+	}
+
+	// Initialize AG-UI SSE server if enabled.
+	if wukongCfg.AGUI.Enabled {
+		aguiCfg := &server.AGUIConfig{
+			Runner: loop.GetRunner(),
+			Path:   wukongCfg.AGUI.Path,
+		}
+		aguiSrv, err := server.NewAGUIServer(aguiCfg)
+		if err != nil {
+			util.Logger.Warn("AG-UI server creation failed",
+				"error", err.Error())
+		} else {
+			addr := wukongCfg.AGUI.Address
+			if addr == "" {
+				addr = ":8080"
 			}
-			a2aServer, err := summon.NewA2AServer(
-				a2aAgent, a2aServerCfg,
-				wukongCfg.A2AServer.AgentName,
-			)
-			if err != nil {
-				util.Logger.Warn("A2A server creation failed, "+
-					"continuing without A2A server",
-					"error", err.Error())
-			} else {
-				go func() {
-					util.Logger.Info("A2A server starting",
-						"address", wukongCfg.A2AServer.Address,
-						"agent", wukongCfg.A2AServer.AgentName)
-					if err := a2aServer.Start(
-						wukongCfg.A2AServer.Address,
-					); err != nil {
-						util.Logger.Warn("A2A server failed",
-							"error", err.Error())
-					}
-				}()
-				state.A2AServer = a2aServer
-			}
+			go func() {
+				if err := aguiSrv.Start(addr); err != nil {
+					util.Logger.Warn("AG-UI server failed",
+						"error", err.Error())
+				}
+			}()
+			state.AGUIServer = aguiSrv
 		}
 	}
 
 	return wukongCfg, loop, state, nil
 }
 
-// a2aRemoteToConfig converts a config A2ARemoteConfig to summon A2AConfig.
-func a2aRemoteToConfig(remote config.A2ARemoteConfig) *summon.A2AConfig {
-	a2aCfg := &summon.A2AConfig{
-		Mode:      summon.A2ARemote,
-		ServerURL: remote.ServerURL,
+// a2aRemoteToConfig converts a config A2ARemoteConfig to an A2AAgent.
+// Uses the new A2AAgent implementation based on tRPC-Agent-Go's a2aagent.
+func a2aRemoteToConfig(remote config.A2ARemoteConfig) *summon.A2AAgent {
+	ag, err := summon.NewA2AAgentFromConfig(remote)
+	if err != nil {
+		util.Logger.Warn("failed to create A2A agent for remote",
+			"name", remote.Name,
+			"error", err.Error())
+		return nil
 	}
-	if remote.AuthType != "" {
-		a2aCfg.Auth = &summon.AuthConfig{
-			Type:              remote.AuthType,
-			APIKey:            remote.APIKey,
-			APIKeyHeader:      remote.APIKeyHeader,
-			JWTSecret:         remote.JWTSecret,
-			JWTAudience:       remote.JWTAudience,
-			JWTIssuer:         remote.JWTIssuer,
-			OAuthTokenURL:     remote.OAuthTokenURL,
-			OAuthClientID:     remote.OAuthClientID,
-			OAuthClientSecret: remote.OAuthClientSecret,
-		}
-	}
-	return a2aCfg
+	util.Logger.Info("A2A remote agent configured",
+		"name", remote.Name,
+		"server_url", remote.ServerURL)
+	return ag
 }
 
 // createExtractorModel creates a model for memory extraction.
