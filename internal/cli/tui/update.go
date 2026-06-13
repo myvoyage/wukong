@@ -45,6 +45,7 @@ type streamEvent struct {
 // sendMessage creates a command to send a user message.
 // Uses an intermediate channel to deliver streaming deltas and tool calls
 // to the TUI update loop for real-time display.
+// Stores a cancel function so Ctrl+C can interrupt in-flight requests.
 func (m *Model) sendMessage(input string) tea.Cmd {
 	if m.streaming {
 		return nil
@@ -55,21 +56,26 @@ func (m *Model) sendMessage(input string) tea.Cmd {
 	m.streaming = true
 	m.currentStream = ""
 
+	// Create cancelable context so Ctrl+C can interrupt the request.
+	ctx, cancel := context.WithCancel(context.Background())
+	m.streamCancel = cancel
+
 	// Channel to pipe events from agent goroutine to TUI update loop
 	streamCh := make(chan streamEvent, 64)
 	m.streamCh = streamCh
 
 	go func() {
 		defer close(streamCh)
+		// Use the cancelable context so Ctrl+C interrupts the request.
+		// Ensure cancel is called on all exit paths.
+		defer cancel()
 
 		timeout := time.Duration(defaultTimeoutMinutes) * time.Minute
 		if m.cfg != nil && m.cfg.Agent.MaxRunDuration > 0 {
 			timeout = m.cfg.Agent.MaxRunDuration
 		}
-		ctx, cancel := context.WithTimeout(
-			context.Background(), timeout,
-		)
-		defer cancel()
+		ctx, timeoutCancel := context.WithTimeout(ctx, timeout)
+		defer timeoutCancel()
 
 		msg := model.NewUserMessage(input)
 		events, err := m.loop.Run(
@@ -77,13 +83,7 @@ func (m *Model) sendMessage(input string) tea.Cmd {
 		)
 		if err != nil {
 			errMsg := err.Error()
-			// Provide user-friendly messages for common errors
-			if strings.Contains(errMsg, "context deadline exceeded") {
-				errMsg = "Request timed out — the model took too long to respond"
-			} else if strings.Contains(errMsg, "connectex") ||
-				strings.Contains(errMsg, "connection refused") {
-				errMsg = "Cannot connect to model — check network/provider"
-			}
+			errMsg = friendlyError(errMsg)
 			streamCh <- streamEvent{
 				Err: "[Error: " + errMsg + "]\n",
 			}
@@ -174,11 +174,17 @@ func readStreamEvent(ch <-chan streamEvent) tea.Cmd {
 }
 
 // addMessage appends a message to the conversation.
+// Excess oldest messages are trimmed to prevent unbounded growth.
 func (m *Model) addMessage(role, content string) {
 	m.messages = append(m.messages, chatEntry{
 		Role:    role,
 		Content: content,
 	})
+	// Trim oldest messages when exceeding the limit.
+	if len(m.messages) > maxMessages {
+		trimCount := len(m.messages) - maxMessages
+		m.messages = m.messages[trimCount:]
+	}
 }
 
 // setStatus updates the agent status display.
@@ -191,3 +197,32 @@ type refreshMsg struct{}
 
 // defaultTimeoutMinutes is the default run timeout in minutes.
 const defaultTimeoutMinutes = 5
+
+// friendlyError maps common error strings to user-friendly messages.
+func friendlyError(errMsg string) string {
+	lower := strings.ToLower(errMsg)
+
+	switch {
+	case strings.Contains(lower, "context deadline exceeded"):
+		return "Request timed out — the model took too long to respond"
+	case strings.Contains(lower, "connectex"),
+		strings.Contains(lower, "connection refused"),
+		strings.Contains(lower, "no such host"):
+		return "Cannot connect to model — check network/provider"
+	case strings.Contains(lower, "401") ||
+		strings.Contains(lower, "unauthorized"):
+		return "Authentication failed — check API key or credentials"
+	case strings.Contains(lower, "429") ||
+		strings.Contains(lower, "rate limit"):
+		return "Rate limited by provider — wait and retry"
+	case strings.Contains(lower, "500") ||
+		strings.Contains(lower, "502") ||
+		strings.Contains(lower, "503"):
+		return "Model service unavailable — provider may be experiencing issues"
+	case strings.Contains(lower, "canceled") ||
+		strings.Contains(lower, "cancelled"):
+		return "Request cancelled by user"
+	default:
+		return errMsg
+	}
+}

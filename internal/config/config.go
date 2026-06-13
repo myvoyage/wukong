@@ -110,6 +110,9 @@ type WukongConfig struct {
 	// Knowledge configures the RAG knowledge retrieval system.
 	Knowledge KnowledgeConfig `mapstructure:"knowledge"`
 
+	// Dify configures the Dify AI platform integration.
+	Dify DifyConfig `mapstructure:"dify"`
+
 	// Workflow configures multi-mode agent orchestration.
 	Workflow WorkflowConfig `mapstructure:"workflow"`
 
@@ -508,6 +511,20 @@ type BrowserConfig struct {
 	MaxDownloadSize int64 `mapstructure:"max_download_size"`
 	// Timeout is the HTTP request timeout.
 	Timeout time.Duration `mapstructure:"timeout"`
+	// BrowserPath is the custom Chrome/Chromium executable path.
+	// When empty, chromedp auto-discovers the browser.
+	BrowserPath string `mapstructure:"browser_path"`
+	// ViewportWidth sets the browser viewport width in pixels.
+	ViewportWidth int `mapstructure:"viewport_width"`
+	// ViewportHeight sets the browser viewport height in pixels.
+	ViewportHeight int `mapstructure:"viewport_height"`
+	// SearchBackend is the web search engine: duckduckgo (default),
+	// searxng (URL required), tavily (API key required).
+	SearchBackend string `mapstructure:"search_backend"`
+	// SearchBackendURL is the URL for SearXNG instances.
+	SearchBackendURL string `mapstructure:"search_backend_url"`
+	// SearchAPIKey is the API key for Tavily.
+	SearchAPIKey string `mapstructure:"search_api_key"`
 }
 
 // VisualiserConfig defines chart and diagram generation settings.
@@ -662,19 +679,49 @@ type KnowledgeConfig struct {
 // Workflow & A2A Server Configuration
 // ============================================================================
 
+// DifyConfig defines settings for the Dify AI platform integration.
+// Dify provides visual workflow orchestration, RAG pipelines, and
+// multi-LLM support via a chat API.
+type DifyConfig struct {
+	// Enabled enables the Dify agent mode. Default: false.
+	Enabled bool `mapstructure:"enabled"`
+	// BaseURL is the Dify API endpoint (e.g., "https://api.dify.ai/v1").
+	BaseURL string `mapstructure:"base_url"`
+	// APISecret is the Dify API secret key for authentication.
+	APISecret string `mapstructure:"api_secret"`
+	// AgentName is the agent name exposed to the workflow. Default: "dify".
+	AgentName string `mapstructure:"agent_name"`
+	// EnableStreaming enables SSE streaming from Dify. Default: false.
+	EnableStreaming bool `mapstructure:"enable_streaming"`
+	// Timeout is the HTTP request timeout. Default: "120s".
+	Timeout time.Duration `mapstructure:"timeout"`
+}
+
 // WorkflowConfig defines multi-mode agent orchestration settings.
-// Supports: single (default), chain, parallel, cycle, graph modes.
+// Supports: single (default), chain, parallel, cycle, graph,
+//           team_coordinator, team_swarm, claude_code modes.
 type WorkflowConfig struct {
-	// Mode is the execution mode: single, chain, parallel, cycle, graph.
+	// Mode is the execution mode.
 	Mode string `mapstructure:"mode"`
 	// MaxIterations is the maximum iterations for cycle/graph modes.
 	MaxIterations int `mapstructure:"max_iterations"`
 	// CycleMode selects the cycle strategy: "default" (planner/executor)
 	// or "code_review" (generator/reviewer loop).
 	CycleMode string `mapstructure:"cycle_mode"`
+	// StreamMode enables inter-node streaming via StreamHub ("none"/"hub").
+	StreamMode string `mapstructure:"stream_mode"`
+	// CacheEnabled enables node caching for graph workflows.
+	CacheEnabled bool `mapstructure:"cache_enabled"`
+	// Engine is the Graph execution engine: "bsp" (default) or "dag".
+	Engine string `mapstructure:"engine"`
 	// SubAgents defines custom sub-agent configurations.
-	// When empty, default agents are used (planner/executor/reviewer, etc.).
 	SubAgents []WorkflowSubAgentConfig `mapstructure:"sub_agents"`
+	// TeamMembers defines team member agents for team_coordinator/team_swarm modes.
+	TeamMembers []TeamMemberConfig `mapstructure:"team_members"`
+	// ClaudeCodeBin is the claude CLI path for claude_code mode.
+	ClaudeCodeBin string `mapstructure:"claude_code_bin"`
+	// CodexBin is the codex CLI path for codex mode.
+	CodexBin string `mapstructure:"codex_bin"`
 }
 
 // WorkflowSubAgentConfig defines a custom sub-agent for workflow modes.
@@ -686,6 +733,18 @@ type WorkflowSubAgentConfig struct {
 	// AllowedTools lists tool names this sub-agent may use (empty = all).
 	AllowedTools []string `mapstructure:"allowed_tools"`
 	// AllTools grants access to all available tools.
+	AllTools bool `mapstructure:"all_tools"`
+}
+
+// TeamMemberConfig defines a team member for team_coordinator or team_swarm modes.
+type TeamMemberConfig struct {
+	// Name is the member identifier (e.g., "coder", "reviewer").
+	Name string `mapstructure:"name"`
+	// Instruction is the system prompt for this member.
+	Instruction string `mapstructure:"instruction"`
+	// AllowedTools lists tool names this member may use.
+	AllowedTools []string `mapstructure:"allowed_tools"`
+	// AllTools grants access to all tools.
 	AllTools bool `mapstructure:"all_tools"`
 }
 
@@ -1042,6 +1101,9 @@ func (l *Loader) setDefaults() {
 	l.v.SetDefault("browser.cache_dir", ".wukong_cache")
 	l.v.SetDefault("browser.max_download_size", 104857600)
 	l.v.SetDefault("browser.timeout", "60s")
+	l.v.SetDefault("browser.viewport_width", 1280)
+	l.v.SetDefault("browser.viewport_height", 720)
+	l.v.SetDefault("browser.search_backend", "duckduckgo")
 
 	// --- Visualiser defaults ---
 	l.v.SetDefault("visualiser.enabled", true)
@@ -1087,9 +1149,18 @@ func (l *Loader) setDefaults() {
 	l.v.SetDefault("knowledge.reranker_enabled", false)
 	l.v.SetDefault("knowledge.search_tool_name", "knowledge_search")
 
+	// --- Dify defaults ---
+	l.v.SetDefault("dify.enabled", false)
+	l.v.SetDefault("dify.agent_name", "dify")
+	l.v.SetDefault("dify.enable_streaming", false)
+	l.v.SetDefault("dify.timeout", "120s")
+
 	// --- Workflow defaults ---
 	l.v.SetDefault("workflow.mode", "single")
 	l.v.SetDefault("workflow.max_iterations", 10)
+	l.v.SetDefault("workflow.stream_mode", "none")
+	l.v.SetDefault("workflow.cache_enabled", false)
+	l.v.SetDefault("workflow.engine", "bsp")
 
 	// --- A2A server defaults ---
 	l.v.SetDefault("a2a_server.enabled", false)

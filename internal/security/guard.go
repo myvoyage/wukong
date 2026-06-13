@@ -169,6 +169,9 @@ func (g *Guard) isHighRiskOperation(toolName string, argsJSON []byte) bool {
 		"file_delete":        true,
 		"browser_navigate":   true,
 		"browser_screenshot": true,
+		"browser_click":      true,
+		"browser_fill":       true,
+		"web_fetch":          true,
 		"apps_create":        true,
 		"apps_deploy":        true,
 	}

@@ -1,199 +1,99 @@
-# Wukong 🐵
+# Wukong  🐵
 
-> **本地优先、可扩展的 AI Agent 平台** | Go 语言 | tRPC 生态系统
+> **本地优先、可扩展的 AI Agent 平台** | Go | tRPC 生态 | 10 工作流 | 64 源文件 | ~18,000 行
 
-Wukong 是一个本地优先、可扩展的 AI Agent 平台，基于 [tRPC-Agent-Go](https://github.com/trpc-group/trpc-agent-go)、[tRPC-MCP-Go](https://github.com/trpc-group/trpc-mcp-go) 和 [tRPC-A2A-Go](https://github.com/trpc-group/trpc-a2a-go) 三大框架构建。
+Wukong 是一个本地优先、可扩展的 AI Agent 平台，基于 tRPC-Agent-Go v1.10.0、tRPC-MCP-Go 和 tRPC-A2A-Go 构建。
 
 ---
 
-## 功能特性
+## 功能矩阵
 
-### 核心能力
-
-| 特性 | 说明 |
+| 领域 | 特性 |
 |------|------|
-| **交互式 Agent 循环** | LLM 推理 → 工具调用 → 结果反馈 → 响应输出 |
-| **5 种工作流模式** | Single / Chain / Parallel / Cycle / Graph |
-| **多模型支持** | OpenAI / Anthropic / Google / DeepSeek / Ollama / LMStudio |
-| **MCP 工具生态** | 10+ 内置扩展 + 外部 MCP 服务器（STDIO/SSE/HTTP） |
-| **长期记忆** | SQLite 持久化 + 自动提取 + 手动管理 |
-| **RAG 知识检索** | Embedding 向量化 + 语义搜索 + 文档加载 |
-| **会话管理** | SQLite/Redis/memory 后端 + 异步摘要 + 上下文压缩 |
-
-### 智能增强
-
-| 特性 | 说明 |
-|------|------|
-| **Todo 任务跟踪** | tRPC 原生 todo_write + TodoEnforcer 强制完成校验 |
-| **Agent 工具委托** | Code Reviewer / Summarizer / Code Generator 子代理 |
-| **评估系统** | EvalSet 用例集 + 4 种指标 + CLI 回归测试 |
-| **上下文优化** | 两遍压缩 + Token 预算管理 + 摘要触发 |
-| **跨会话召回** | FTS5 全文搜索 + Hybrid 混合语义搜索 |
-
-### 分布式与可观测
-
-| 特性 | 说明 |
-|------|------|
-| **A2A 协议** | Agent-to-Agent 分布式通信（Server + Client） |
-| **AG-UI 协议** | SSE 实时对话，兼容 CopilotKit / TDesign Chat |
-| **Langfuse 追踪** | LLM 全链路可观测 + 可视化调试 |
-| **OpenTelemetry** | 分布式 Tracing + Metrics + Logging |
-| **Artifact COS** | 腾讯云 COS 云端制品存储（版本化二进制数据） |
-
-### 安全与治理
-
-| 特性 | 说明 |
-|------|------|
-| **4 级权限模式** | auto / smart / manual / chat_only |
-| **命令拦截** | 危险命令模式拦截（rm -rf /, dd, mkfs 等） |
-| **Prompt 注入检测** | tRPC Guardrail 插件 |
-| **工具过滤** | Allowlist / Denylist + 权限策略 |
-| **HITL 中断** | Graph 工作流人工审批暂停/恢复 |
+| **Agent 引擎** | 交互式工具调用循环 · 10 种工作流 · 两遍上下文压缩 · Token 预算 · 消息上限 500 |
+| **多 Agent** | Chain/Parallel/Cycle/Graph · Team(Coordinator/Swarm) · AgentTool · A2A |
+| **外部 Agent** | Claude Code · Codex · Dify 平台 · 远程 A2A |
+| **LLM Provider** | OpenAI · Anthropic · Google · DeepSeek · Ollama · LMStudio (6 种) |
+| **MCP 工具** | 10 内置扩展 · 外部 STDIO/SSE/HTTP · MCP Broker · Tool Filter(glob) · SessionReconnect |
+| **浏览器自动化** | Chromedp(CDP) · 9 个工具(navigate/extract/screenshot/click/fill/web_fetch) · 文件缓存 · 2 浏览模式 |
+| **Web 搜索** | DuckDuckGo + 预留 SearXNG/Tavily · search_backend 配置 |
+| **RAG 知识库** | OpenAI Embedding · Inmemory Vector · dir/URL 源 · knowledge_search |
+| **长期记忆** | SQLite 持久化 · 异步提取(3w) · 6 手动工具 · WaitGroup 优雅停止 · 5s 超时 |
+| **会话管理** | SQLite/Redis/Inmemory · 异步摘要 · TTL · 事件分页 |
+| **安全防护** | 4 级权限(smart) · Allowlist/Denylist · 命令拦截 · Prompt注入检测 · web_fetch 高危标记 |
+| **上下文优化** | 两遍压缩(占位符+截断) · 修订摘要 · Per-Tool控制 · Token裁剪 |
+| **可观测性** | OpenTelemetry Tracing · Langfuse LLM追踪 · 结构化日志 · 健康检查 |
+| **制品存储** | Inmemory(默认) · COS(云端) |
+| **分布式** | A2A Server · AG-UI SSE · Redis Session |
+| **评估** | EvalSet · 4 指标 · CLI 回归 · JSON 结果 |
+| **HITL** | Graph 中断/恢复 · 静态/动态/外部 3 种 |
+| **TUI** | Bubbletea + Lipgloss · Ctrl+C 流式取消 · 消息上限 · 友好错误(401/429/500) |
 
 ---
 
 ## 快速开始
 
-### 前置条件
-
-- Go 1.26+
-- LLM API Key（或本地 Ollama / LMStudio）
-
-### 安装
-
 ```bash
-git clone https://github.com/km269/wukong.git
-cd wukong
+git clone https://github.com/km269/wukong.git && cd wukong
 go build -o wukong ./cmd/wukong/
-```
 
-### 最小配置
-
-```yaml
-# config.yaml
+# 最小 config.yaml
 default_provider: "openai"
-
 providers:
   - name: "openai"
     type: "openai"
-    base_url: "https://api.openai.com/v1"
     api_key: "${OPENAI_API_KEY}"
     model: "gpt-4o"
+
+./wukong session                     # 交互会话
+./wukong session --provider deepseek # 指定 Provider
+./wukong eval                        # 回归测试
+./wukong extension list              # 扩展管理
+./wukong configure                   # 配置向导
 ```
-
-### 使用
-
-```bash
-# 启动交互式会话
-./wukong session
-
-# 指定 Provider
-./wukong session --provider deepseek
-
-# 恢复会话
-./wukong session --session-id <id>
-
-# 运行评估
-./wukong eval
-
-# 管理扩展
-./wukong extension list
-./wukong extension install <deeplink-url>
-
-# 生成配置
-./wukong configure
-```
-
-### TUI 操作
-
-| 操作 | 说明 |
-|------|------|
-| 输入消息 + `Ctrl+D` | 发送消息 |
-| `Ctrl+C` | 退出 |
-| `/new` | 新会话 |
-| `/clear` | 清屏 |
-| `/model` | 查看/切换模型 |
-| `/exts` | 查看扩展 |
-| `/help` | 帮助 |
 
 ---
 
-## 项目结构
+## 项目结构 (64 源文件)
 
 ```
 wukong/
-├── cmd/wukong/main.go              # 程序入口
+├── cmd/wukong/main.go          入口
 ├── internal/
-│   ├── agent/                      # 核心引擎：循环、工作流、上下文、HITL
-│   ├── apps/                       # HTML 应用管理
-│   ├── artifact/                   # 制品服务工厂（inmemory/cos）
-│   ├── browser/                    # 浏览器自动化（Chromedp）
-│   ├── cli/                        # CLI 命令 + TUI + 配置向导
-│   │   └── tui/                    # Bubbletea 终端界面
-│   ├── codemode/                   # JS 沙箱（goja）
-│   ├── config/                     # Viper 配置加载 + 全部 Config 结构体
-│   ├── eval/                       # 评估框架（EvalSet/Metric/Evaluator）
-│   ├── extension/                  # MCP 扩展系统
-│   │   └── builtin/                # 10 个内置扩展
-│   ├── knowledge/                  # RAG 知识检索（Embedding+索引+搜索）
-│   ├── memory/                     # 长期记忆管理
-│   ├── observability/              # Langfuse LLM 追踪
-│   ├── provider/                   # LLM 模型工厂（6 种 Provider）
-│   ├── recall/                     # 跨会话 FTS5 搜索
-│   ├── security/                   # 安全守卫
-│   ├── server/                     # AG-UI SSE 服务器
-│   ├── session/                    # 会话存储（sqlite/redis）
-│   ├── skill/                      # Agent Skill 仓库
-│   ├── summon/                     # 子代理委派 + A2A 凭证
-│   ├── telemetry/                  # OpenTelemetry
-│   ├── todo/                       # 任务跟踪
-│   ├── topofmind/                  # 持久化指令注入
-│   └── util/                       # 工具库（DB 连接池、日志）
-├── config.yaml                     # 默认配置
-└── docs-related files...
+│   ├── agent/       CoreLoop · WorkflowBuilder(10模式) · TeamBuilder · DifyAgent · HITL · TodoEnforcer
+│   ├── apps/        HTML 应用文件管理
+│   ├── artifact/    inmemory / COS 制品工厂
+│   ├── browser/     HTTP + Chromedp(CDP) 双模引擎 · Click/Fill 修复泄漏
+│   ├── cli/+tui/    6子命令 · Bubbletea TUI · Ctrl+C 流式取消
+│   ├── codemode/    goja JS 沙箱
+│   ├── config/      Viper 配置 · 28 段 · 453行
+│   ├── eval/        EvalSet/Metric/Evaluator
+│   ├── extension/   MCP 管理器 + 10内置 + MCP Client(stdio/sse/http)
+│   ├── knowledge/   RAG(Embedding+Vector+Source)
+│   ├── memory/      GracefulShutdown(WaitGroup+timeout+isClosing)
+│   ├── observability/ Langfuse OTLP
+│   ├── provider/    6种 LLM 工厂
+│   ├── recall/      FTS5 跨会话搜索
+│   ├── security/    4级权限 + 8高危工具(web_fetch新增)
+│   ├── server/      AG-UI SSE
+│   ├── session/     sqlite/redis 会话
+│   ├── skill/       Agent Skill 仓库
+│   ├── summon/      A2A + 凭证轮换
+│   ├── telemetry/   OTel
+│   ├── todo/        任务跟踪
+│   └── util/        DB池(WAL checkpoint) · 日志
+├── config.yaml      28段 · 453行
+└── docs: README / ARCHITECTURE / CONFIG
 ```
 
 ---
 
 ## 技术栈
 
-| 组件 | 技术 |
-|------|------|
-| **Agent 框架** | tRPC-Agent-Go v1.10.0 |
-| **MCP 协议** | tRPC-MCP-Go v0.0.16 |
-| **A2A 协议** | tRPC-A2A-Go v0.2.5 |
-| **CLI/TUI** | Cobra + Bubbletea + Lipgloss |
-| **存储** | SQLite (WAL) + Redis (go-redis/v9) |
-| **LLM** | OpenAI 兼容 API |
-| **浏览器** | Chromedp |
-| **JS 沙箱** | goja |
-| **可观测** | OpenTelemetry + Langfuse |
-| **制品存储** | 腾讯云 COS (cos-go-sdk-v5) |
-| **配置** | Viper (YAML + 环境变量) |
+tRPC-Agent-Go v1.10.0 · tRPC-MCP-Go v0.0.16 · Bubbletea+lipgloss · SQLite(WAL) · go-redis/v9 · COS SDK · Chromedp · goja · OTel · Langfuse · Cobra+Viper
 
 ---
 
 ## 文档
 
-| 文档 | 说明 |
-|------|------|
-| [README.md](README.md) | 本文档 |
-| [ARCHITECTURE.md](ARCHITECTURE.md) | 系统架构设计文档 |
-| [CONFIG.md](CONFIG.md) | 完整配置参考手册 |
-
----
-
-## 开发
-
-```bash
-make build          # 构建
-make test           # 测试
-make lint           # 代码检查
-make run            # 运行
-```
-
-## 致谢
-
-- [tRPC-Agent-Go](https://github.com/trpc-group/trpc-agent-go) — Agent 核心框架
-- [tRPC-MCP-Go](https://github.com/trpc-group/trpc-mcp-go) — MCP 协议实现
-- [tRPC-A2A-Go](https://github.com/trpc-group/trpc-a2a-go) — A2A 协议实现
+[README](README.md) · [ARCHITECTURE](ARCHITECTURE.md) · [CONFIG](CONFIG.md)

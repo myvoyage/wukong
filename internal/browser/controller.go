@@ -25,10 +25,11 @@ import (
 // It uses net/http for basic page fetching and chromedp for
 // JavaScript rendering, real screenshots, and page interaction.
 type Controller struct {
-	cfg          *config.BrowserConfig
-	client       *http.Client
-	chromedpCtx  context.Context
+	cfg            *config.BrowserConfig
+	client         *http.Client
+	chromedpCtx    context.Context
 	chromedpCancel context.CancelFunc
+	allocCancel    context.CancelFunc // browser process lifecycle
 }
 
 // NewController creates a new browser automation controller.
@@ -63,9 +64,10 @@ func (c *Controller) initChromedp() {
 		chromedp.Flag("disable-dev-shm-usage", true),
 	)
 
-	allocCtx, _ := chromedp.NewExecAllocator(
+	allocCtx, allocCancel := chromedp.NewExecAllocator(
 		context.Background(), opts...,
 	)
+	c.allocCancel = allocCancel
 
 	ctx, cancel := chromedp.NewContext(allocCtx)
 	c.chromedpCtx = ctx
@@ -500,6 +502,10 @@ func (c *Controller) Close() error {
 
 	if c.chromedpCancel != nil {
 		c.chromedpCancel()
+	}
+	// Kill the browser process to prevent zombie Chrome processes.
+	if c.allocCancel != nil {
+		c.allocCancel()
 	}
 
 	return nil

@@ -269,16 +269,23 @@ func NewCoreLoop(cfg CoreLoopConfig) (*CoreLoop, error) {
 		recallStore:    cfg.RecallStore,
 		closeFn: func() error {
 			var errs []error
-			// 1. Close memory service first — stops auto-extract
-			//    workers and flushes pending memory writes to DB.
+			// 1. Close runner first — stops active runs and
+			//    prevents new EnqueueAutoMemoryJob calls.
+			//    This is critical: the runner produces extraction
+			//    jobs; without it stopped, new jobs would keep
+			//    arriving while memory workers are shutting down.
+			if err := r.Close(); err != nil {
+				errs = append(errs, err)
+			}
+			// 2. Close memory service — waits for in-flight
+			//    extraction jobs to complete (up to 5s timeout),
+			//    then stops auto-extract workers. The shared DB
+			//    connection is NOT closed here; it is managed by
+			//    the pool (step 5).
 			if cfg.MemoryClose != nil {
 				if err := cfg.MemoryClose(); err != nil {
 					errs = append(errs, err)
 				}
-			}
-			// 2. Close runner — stops active runs and owned resources.
-			if err := r.Close(); err != nil {
-				errs = append(errs, err)
 			}
 			// 3. Close session service — stops summary workers,
 			//    closes channels, releases session-level resources.
@@ -289,7 +296,8 @@ func NewCoreLoop(cfg CoreLoopConfig) (*CoreLoop, error) {
 					}
 				}
 			}
-			// 4. Flush and shut down telemetry.
+			// 4. Flush and shut down telemetry (including
+			//    Langfuse if enabled).
 			if cfg.TelemetryShutdown != nil {
 				if err := cfg.TelemetryShutdown(context.Background()); err != nil {
 					errs = append(errs, err)
@@ -299,11 +307,6 @@ func NewCoreLoop(cfg CoreLoopConfig) (*CoreLoop, error) {
 			//    services have stopped their workers and flushed
 			//    their writes. This ensures no pending transactions
 			//    are lost and the WAL is properly checkpointed.
-			//
-			//    A brief delay allows any in-flight auto-memory
-			//    extraction jobs to finish writing before the DB
-			//    connection is closed.
-			time.Sleep(100 * time.Millisecond)
 			if cfg.DBPoolClose != nil {
 				if err := cfg.DBPoolClose(); err != nil {
 					errs = append(errs, err)

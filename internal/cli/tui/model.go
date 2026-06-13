@@ -6,16 +6,21 @@ package tui
 import (
 	"fmt"
 	"strings"
-	"time"
 
 	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/google/uuid"
 
 	"github.com/km269/wukong/internal/agent"
 	"github.com/km269/wukong/internal/config"
 )
+
+// maxMessages limits the chat history retained in memory.
+// Beyond this limit, the oldest messages are dropped to prevent
+// unbounded growth during long sessions.
+const maxMessages = 500
 
 // chatEntry represents a single message in the conversation.
 type chatEntry struct {
@@ -52,6 +57,7 @@ type Model struct {
 	// Streaming state
 	streaming     bool
 	currentStream string
+	streamCancel  func() // NEW: cancel function for interrupting streaming
 	streamCh      <-chan streamEvent
 
 	// Exit flag (set by /exit or /quit command)
@@ -153,6 +159,16 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg.Type {
 		case tea.KeyCtrlC:
 			if m.streaming {
+				// Cancel the in-flight request and exit streaming mode.
+				if m.streamCancel != nil {
+					m.streamCancel()
+				}
+				m.streaming = false
+				m.status = "Cancelled by user"
+				m.messages = append(m.messages,
+					chatEntry{Role: "system",
+						Content: "[Request cancelled by user]"})
+				m.updateViewport()
 				return m, nil
 			}
 			return m, tea.Quit
@@ -220,6 +236,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case streamEndMsg:
 		m.streaming = false
+		m.streamCancel = nil
 		if msg.Content != "" {
 			m.addMessage("assistant", msg.Content)
 		}
@@ -471,5 +488,5 @@ func StartTUI(
 // Uses a timestamp-based prefix for sortability followed by random
 // bytes for uniqueness.
 func generateSessionID() string {
-	return fmt.Sprintf("sess-%x", time.Now().UnixNano())
+	return uuid.New().String()
 }

@@ -26,11 +26,16 @@ import (
 type WorkflowMode string
 
 const (
-	WorkflowSingle   WorkflowMode = "single"
-	WorkflowChain    WorkflowMode = "chain"
-	WorkflowParallel WorkflowMode = "parallel"
-	WorkflowCycle    WorkflowMode = "cycle"
-	WorkflowGraph    WorkflowMode = "graph"
+	WorkflowSingle          WorkflowMode = "single"
+	WorkflowChain           WorkflowMode = "chain"
+	WorkflowParallel        WorkflowMode = "parallel"
+	WorkflowCycle           WorkflowMode = "cycle"
+	WorkflowGraph           WorkflowMode = "graph"
+	WorkflowTeamCoordinator WorkflowMode = "team_coordinator"
+	WorkflowTeamSwarm       WorkflowMode = "team_swarm"
+	WorkflowClaudeCode      WorkflowMode = "claude_code"
+	WorkflowCodex           WorkflowMode = "codex"
+	WorkflowDify            WorkflowMode = "dify"
 )
 
 // OrchestrationConfig holds configuration for multi-agent workflows.
@@ -93,6 +98,8 @@ func (b *WorkflowBuilder) Build(
 		return b.buildCycleAgent(wfCfg)
 	case WorkflowGraph:
 		return b.buildGraphAgent(wfCfg)
+	case WorkflowTeamCoordinator, WorkflowTeamSwarm, WorkflowClaudeCode, WorkflowCodex, WorkflowDify:
+		return b.buildTeamAgent(ctx, wfCfg)
 	default:
 		return nil, fmt.Errorf(
 			"unsupported workflow mode: %s", wfCfg.Mode,
@@ -584,6 +591,32 @@ func containsKeyword(s, keyword string) bool {
 
 func intPtr(i int) *int       { return &i }
 func float64Ptr(f float64) *float64 { return &f }
+
+// buildTeamAgent creates a Team-based agent (coordinator, swarm, or
+// Claude Code mode). Uses the TeamBuilder for construction.
+func (b *WorkflowBuilder) buildTeamAgent(
+	ctx context.Context, wfCfg *OrchestrationConfig,
+) (agent.Agent, error) {
+	tb, err := NewTeamBuilder(b.factory, b.cfg, b.tools, b.toolSets)
+	if err != nil {
+		return nil, fmt.Errorf("create team builder: %w", err)
+	}
+
+	switch wfCfg.Mode {
+	case WorkflowTeamCoordinator:
+		return tb.BuildCoordinatorTeam(ctx)
+	case WorkflowTeamSwarm:
+		return tb.BuildSwarm(ctx)
+	case WorkflowClaudeCode:
+		return tb.BuildClaudeCode()
+	case WorkflowCodex:
+		return tb.BuildCodex()
+	case WorkflowDify:
+		return BuildDify(ctx, b.cfg)
+	default:
+		return nil, fmt.Errorf("unknown team mode: %s", wfCfg.Mode)
+	}
+}
 
 // buildBaseInstruction returns the base system instruction.
 func buildBaseInstruction() string {

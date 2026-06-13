@@ -104,6 +104,27 @@ func NewComputerControllerToolSet(
 					"tools instead.",
 			),
 		),
+		function.NewFunctionTool(
+			ts.browserClick,
+			function.WithName("browser_click"),
+			function.WithDescription(
+				"Click an element on the current page using a "+
+					"CSS selector. Requires browser automation "+
+					"mode (not HTTP fallback). Use after "+
+					"browser_navigate to interact with dynamic "+
+					"web pages.",
+			),
+		),
+		function.NewFunctionTool(
+			ts.browserFill,
+			function.WithName("browser_fill"),
+			function.WithDescription(
+				"Fill a form input element on the current page "+
+					"using a CSS selector and value. Requires "+
+					"browser automation mode. Use after "+
+					"browser_navigate to automate form interaction.",
+			),
+		),
 	}
 	return ts
 }
@@ -407,6 +428,61 @@ func (ts *ComputerControllerToolSet) cacheClear(
 			"Cleared %d files from cache", cleared,
 		),
 	}, nil
+}
+
+// BrowserClickReq is the input for clicking an element.
+type BrowserClickReq struct {
+	URL      string `json:"url,omitempty" jsonschema:"description=Page URL (optional, uses last navigated page if empty)"`
+	Selector string `json:"selector" jsonschema:"description=CSS selector of the element to click"`
+}
+
+// BrowserClickRsp is the output for clicking.
+type BrowserClickRsp struct {
+	Success bool   `json:"success"`
+	Content string `json:"content,omitempty"`
+	Error   string `json:"error,omitempty"`
+}
+
+func (ts *ComputerControllerToolSet) browserClick(
+	ctx context.Context, req BrowserClickReq,
+) (BrowserClickRsp, error) {
+	result, err := ts.browser.ClickElement(ctx, req.URL, req.Selector)
+	if err != nil {
+		return BrowserClickRsp{Success: false, Error: err.Error()}, nil
+	}
+	if !result.Success {
+		return BrowserClickRsp{Success: false, Error: result.Error}, nil
+	}
+	return BrowserClickRsp{
+		Success: true,
+		Content: result.Content,
+	}, nil
+}
+
+// BrowserFillReq is the input for filling a form input.
+type BrowserFillReq struct {
+	URL      string `json:"url,omitempty" jsonschema:"description=Page URL (optional, uses last navigated page if empty)"`
+	Selector string `json:"selector" jsonschema:"description=CSS selector of the input element"`
+	Value    string `json:"value" jsonschema:"description=Text value to fill"`
+}
+
+// BrowserFillRsp is the output for filling a form.
+type BrowserFillRsp struct {
+	Success bool   `json:"success"`
+	Error   string `json:"error,omitempty"`
+}
+
+func (ts *ComputerControllerToolSet) browserFill(
+	ctx context.Context, req BrowserFillReq,
+) (BrowserFillRsp, error) {
+	result, err := ts.browser.FillForm(ctx, req.URL, req.Selector, req.Value)
+	if err != nil {
+		return BrowserFillRsp{Success: false, Error: err.Error()}, nil
+	}
+	if !result.Success {
+		return BrowserFillRsp{Success: false, Error: result.Error}, nil
+	}
+	return BrowserFillRsp{Success: true}, nil
 }
 
 // BrowserNavigateReq is the input for browser navigation.

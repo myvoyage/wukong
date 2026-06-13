@@ -240,6 +240,12 @@ browser:
   cache_dir: ".wukong_cache"
   max_download_size: 104857600
   timeout: "60s"
+  # browser_path: ""                   # 自定义Chrome路径
+  viewport_width: 1280                 # 视口宽度
+  viewport_height: 720                 # 视口高度
+  search_backend: "duckduckgo"         # duckduckgo / searxng / tavily
+  # search_backend_url: ""             # SearXNG 实例URL
+  # search_api_key: ""                 # Tavily API Key
 
 # ---------------------------------------------------------------------------
 # Visualiser - 图表生成配置
@@ -325,6 +331,8 @@ knowledge:
 
 # ---------------------------------------------------------------------------
 # Workflow - 多模式 Agent 编排配置
+# 支持模式: single, chain, parallel, cycle, graph,
+#           team_coordinator, team_swarm, claude_code, codex, dify
 # ---------------------------------------------------------------------------
 workflow:
   mode: "single"
@@ -333,7 +341,34 @@ workflow:
   #   "default"      - planner → executor 循环
   #   "code_review"  - 代码生成 → 审查 → 修改循环 (适合自主编码)
   cycle_mode: "default"
+  # Graph 高级特性
+  stream_mode: "none"            # none / hub (节点间流式通信)
+  cache_enabled: false           # 节点缓存 (纯函数节点重复计算)
+  engine: "bsp"                  # bsp / dag (执行引擎)
   sub_agents: []
+  # Team 模式成员 (mode="team_coordinator"/"team_swarm" 时生效):
+  # team_members:
+  #   - name: "researcher"
+  #     instruction: "You are a research specialist..."
+  #   - name: "coder"
+  #     instruction: "You are a coding specialist..."
+  #   - name: "reviewer"
+  #     instruction: "You are a quality reviewer..."
+  # Claude Code 模式 (mode="claude_code" 时生效):
+  # claude_code_bin: "claude"
+  # Codex 模式 (mode="codex" 时生效):
+  # codex_bin: "codex"
+
+# ---------------------------------------------------------------------------
+# Dify - Dify AI 平台集成（可视化工作流 + RAG + 多LLM）
+# ---------------------------------------------------------------------------
+dify:
+  enabled: false
+  # base_url: "https://api.dify.ai/v1"
+  # api_secret: "${DIFY_API_SECRET}"
+  agent_name: "dify"
+  enable_streaming: false
+  timeout: "120s"
 
 # ---------------------------------------------------------------------------
 # A2A Server - 本地 A2A 协议服务配置
@@ -350,7 +385,7 @@ a2a_server:
 # 支持 CopilotKit / TDesign Chat 等 AG-UI 协议客户端
 # ---------------------------------------------------------------------------
 agui:
-  enabled: false
+  enabled: true #false
   address: ":8080"            # 监听地址
   path: "/agui"               # SSE 端点路径
 
