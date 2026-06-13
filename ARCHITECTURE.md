@@ -1,6 +1,6 @@
 # Wukong 系统架构文档
 
-> **版本**: v0.4.0 | **Go**: 1.26 | **总源文件**: 90+ (.go) + 26 (_test.go) | **~25,000 行**
+> **版本**: v0.5.0 | **Go**: 1.26 | **总源文件**: 101 (.go) + 31 (_test.go) | **~28,000 行**
 
 ---
 
@@ -36,11 +36,11 @@
 │   PromptTemplateManager · AgentCallbacks · ToolCallbacks              │
 ├──────────────────────────────────────────────────────────────────────┤
 │ 服务层 │ internal/*/                                                  │
-│   Provider(6) · Extension(10内置+MCP+Broker)                           │
+│   Provider(7) · Extension(12内置+MCP+Broker+ACPMCPBridge)              │
 │   Session(sqlite/redis) · Memory(GracefulShutdown)                     │
 │   Knowledge(RAG) · Recall(FTS5) · Artifact(COS)                        │
 │   Browser(HTTP+Chromedp) · CodeMode(goja JS沙箱)                       │
-│   Server(AG-UI SSE) · Summon(A2A) · Skill · Todo                       │
+│   Server(AG-UI SSE + ACP) · Summon(A2A) · Skill · Todo                 │
 │   Observability(Langfuse+OTel) · Eval                                  │
 ├──────────────────────────────────────────────────────────────────────┤
 │ 存储层 │ wukong.db(WAL,FTS5) + Redis + COS                             │
@@ -83,13 +83,15 @@ wukong/
 │   ├── codemode/executor.go          goja JS沙箱执行器
 │   ├── config/config.go              完整配置定义（55KB）
 │   ├── eval/eval.go                  评估框架
-│   ├── extension/                    MCP扩展系统（21文件）
+│   ├── extension/                    MCP扩展系统（24文件）
 │   │   ├── manager.go                扩展管理器
 │   │   ├── factory.go                内置扩展工厂
 │   │   ├── types.go                  扩展类型定义
 │   │   ├── manager_tools.go          扩展管理工具（4个）
 │   │   ├── mcp_client.go             MCP客户端（stdio/sse/streamable）
 │   │   ├── deeplink.go               Deeplink URL解析安装
+│   │   ├── acp_mcp.go                ACP MCP Bridge（扩展→MCP Server透传）
+│   │   ├── acp_mcp_test.go           ACP MCP Bridge 测试
 │   │   └── builtin/                  内置扩展实现（13文件）
 │   │       ├── registry.go           内置扩展注册表（10个）
 │   │       ├── developer.go          开发者工具（6个）
@@ -106,14 +108,21 @@ wukong/
 │   ├── knowledge/manager.go          RAG知识库管理
 │   ├── memory/store.go               长期记忆（优雅关闭）
 │   ├── observability/langfuse.go     Langfuse LLM追踪
-│   ├── provider/factory.go           6种LLM Provider工厂
+│   ├── provider/                     7种LLM Provider工厂
+│   │   ├── factory.go                 工厂（openai/acp等7种）
+│   │   ├── acp.go                     ACP Provider（Agent Client Protocol）
+│   │   └── factory_test.go            Provider工厂测试
 │   ├── recall/                       跨会话回溯
 │   │   ├── store.go                  FTS5存储+索引
 │   │   └── tool.go                   回溯工具（2个）
 │   ├── security/                     安全防护
 │   │   ├── guard.go                  4级权限+命令拦截
 │   │   └── ignore.go                 .wukongignore文件黑名单
-│   ├── server/agui.go                AG-UI SSE服务器
+│   ├── server/                       服务器层
+│   │   ├── agui.go                     AG-UI SSE 服务器
+│   │   ├── agui_test.go                AG-UI 测试
+│   │   ├── acp.go                      ACP Server 端点
+│   │   └── acp_test.go                 ACP Server 测试 (6 PASS)
 │   ├── session/                      会话管理（sqlite/redis）
 │   ├── skill/manager.go              Agent Skill仓库
 │   ├── summon/                       子代理调度
@@ -550,12 +559,13 @@ cmd/main → cli.Execute → session.bootstrapSession
   ├── config.Loader         配置加载
   ├── telemetry.Manager     OTel初始化
   ├── builtin.Register      内置扩展注册
-  ├── provider.Factory      6种LLM工厂
+  ├── provider.Factory      7种LLM工厂（含ACP）
   ├── util.DatabasePool     共享DB池
   ├── session.Service       会话服务
   ├── memory.MemoryManager  记忆管理器
   ├── security.Guard        安全守卫
   ├── extension.Manager     扩展管理器
+  ├── extension.ACPMCPBridge ACP MCP Bridge（扩展→MCP透传）
   ├── recall.Store          FTS5回溯
   ├── topofmind.Manager     首要任务
   ├── codemode.Executor     JS沙箱
@@ -570,6 +580,7 @@ cmd/main → cli.Execute → session.bootstrapSession
   ├── project.Manager       项目追踪
   ├── [可选] summon.A2AServer  A2A服务
   ├── [可选] server.AGUIServer AG-UI SSE
+  ├── [可选] server.ACPServer  ACP协议端点
   └── → agent.NewCoreLoop()  核心循环创建
 ```
 
@@ -593,7 +604,59 @@ cmd/main → cli.Execute → session.bootstrapSession
 
 ---
 
-## 12. 设计决策 (ADR)
+## 12. ACP 集成
+
+### 12.1 ACP（代理客户端协议）架构
+
+```
+┌────────────────────────────────────────────────────────────┐
+│ ACP Provider (provider/acp.go)                              │
+│ 将 ACP 兼容代理作为 LLM Provider 使用                        │
+│   providers[].type = "acp"                                  │
+│   → POST http://agent:4000/message/send                    │
+│   → 响应转换为 tRPC model.Response                          │
+├────────────────────────────────────────────────────────────┤
+│ ACP Server (server/acp.go)                                  │
+│ 让 ACP 兼容客户端原生连接到 Wukong                           │
+│   POST /acp/message/send    — 用户消息 + SSE 流式响应       │
+│   GET  /acp/tools/list      — Agent Card + 工具列表         │
+│   POST /acp/tools/call      — 直接工具调用                  │
+│   GET  /acp/.well-known/agent.json — 能力发现               │
+│   GET  /acp/health          — 健康检查                      │
+├────────────────────────────────────────────────────────────┤
+│ ACP MCP Bridge (extension/acp_mcp.go)                       │
+│ 将 Wukong 扩展透传为 MCP Server 供 ACP 代理调用             │
+│   POST /mcp   — JSON-RPC: tools/list, tools/call            │
+│   → 遍历 extension.Manager.ToolSets()                       │
+│   → tool.Declaration() → MCP Tool Schema                    │
+│   → 转发调用到 tool.CallableTool                            │
+└────────────────────────────────────────────────────────────┘
+```
+
+### 12.2 协议支持矩阵
+
+| 协议 | Provider | Server | 工具透传 | 流式 |
+|------|----------|--------|---------|------|
+| **A2A** | ✅ 客户端 | ✅ 服务端 | ✅ AgentTool | ✅ TaskArtifactUpdate |
+| **MCP** | ✅ 客户端 | ❌ | ✅ 工具消费 | ✅ POST SSE |
+| **AG-UI** | — | ✅ 服务端 | — | ✅ SSE |
+| **ACP** | ✅ Provider | ✅ 服务端 | ✅ MCP Bridge | ✅ SSE |
+
+### 12.3 关闭链（含 ACP）
+
+```
+Signal/Return → defer
+  1. A2AServer.Stop()
+  2. ACPServer.Stop()
+  3. ACPMCPBridge.Stop()    ← 新增
+  4. KnowledgeMgr.Close()
+  5. CoreLoop.Close()
+     └→ 5步链: Runner→Memory→Session→Telemetry→DBPool
+```
+
+---
+
+## 13. 设计决策 (ADR)
 
 | ADR | 决策 | 理由 |
 |-----|------|------|
@@ -610,3 +673,5 @@ cmd/main → cli.Execute → session.bootstrapSession
 | 11 | 延迟注入模式 | apps/code_mode/top_of_mind 需要运行时依赖 |
 | 12 | MCP Broker | 大量外部工具时按需发现，避免工具列表臃肿 |
 | 13 | Project Tracking | 工作目录自动记录，会话快速恢复 |
+| 14 | ACP MCP Bridge | tRPC-MCP-Go Server 暴露扩展，ACP 代理透传调用 |
+| 15 | ACP Server + Provider | 标准 ACP 协议端点 + Provider 类型，双向集成 |

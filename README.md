@@ -1,6 +1,6 @@
 # Wukong 🐵
 
-> **本地优先、可扩展的 AI Agent 平台** | Go 1.26 | tRPC 生态 | 10种工作流 | 12个内置扩展 | ~25,000行
+> **本地优先、可扩展的 AI Agent 平台** | Go 1.26 | tRPC 生态 | 10种工作流 | 12个内置扩展 | 7种Provider | ACP/A2A/MCP三协议 | 101源文件
 
 Wukong 是一个本地优先、可扩展的 AI Agent 平台，基于 [tRPC-Agent-Go](https://github.com/trpc-group/trpc-agent-go) v1.10.0、[tRPC-MCP-Go](https://github.com/trpc-group/trpc-mcp-go) 和 [tRPC-A2A-Go](https://github.com/trpc-group/trpc-a2a-go) 构建。提供类似 Goose 的 CLI 交互体验，支持多种 LLM 后端、工具调用、浏览器自动化、长期记忆、RAG 知识检索等能力。
 
@@ -13,9 +13,10 @@ Wukong 是一个本地优先、可扩展的 AI Agent 平台，基于 [tRPC-Agent
 | **Agent 引擎** | 交互式工具调用循环 · 10种工作流模式 · 两遍上下文压缩 · Token预算管理 · 消息上限500 |
 | **多Agent编排** | Chain/Parallel/Cycle/Graph · Team(Coordinator/Swarm) · AgentTool · A2A协议 |
 | **外部Agent** | Claude Code CLI · Codex CLI · Dify AI平台 · 远程A2A代理（JWT/APIKey/OAuth2） |
-| **LLM Provider** | OpenAI · Anthropic · Google Gemini · DeepSeek · Ollama · LMStudio（6种，统一OpenAI兼容API） |
-| **扩展系统** | 12个内置扩展 · 外部MCP服务器（stdio/sse/streamable） · MCP Broker按需发现 · Tool Filter(glob) · SessionReconnect · Deeplink一键安装 · Extension Manager动态管理 |
+| **LLM Provider** | OpenAI · Anthropic · Google Gemini · DeepSeek · Ollama · LMStudio · **ACP**（7种，统一OpenAI兼容API + ACP代理协议） |
+| **扩展系统** | 12个内置扩展 · 外部MCP服务器（stdio/sse/streamable） · MCP Broker按需发现 · Tool Filter(glob) · SessionReconnect · Deeplink一键安装 · Extension Manager动态管理 · **ACP MCP Bridge（扩展透传）** |
 | **内置扩展** | Developer(6) · ComputerController(9) · Memory(6) · Visualiser(3) · Tutorial(3) · Web(1) · AgentTools(3) · Apps(5) · Recall(2) · CodeMode(2) · Todo(5+1) · TopOfMind(4) |
+| **协议支持** | **ACP**（Server + Provider + MCP Bridge） · **A2A**（Server + 客户端） · **MCP**（客户端 + Broker） · **AG-UI**（SSE服务端） |
 | **浏览器自动化** | Chromedp(CDP协议) · 9个工具(navigate/extract/screenshot/click/fill/web_fetch/cache) · 双模式(HTTP+Chromedp) · Chrome泄漏修复 |
 | **Web搜索** | DuckDuckGo即时回答 · 预留SearXNG/Tavily · 可配置搜索后端 |
 | **RAG知识库** | OpenAI Embedding(1536维) · Inmemory Vector Store · dir/URL文档源 · knowledge_search工具 · 可选ReRanker |
@@ -27,7 +28,7 @@ Wukong 是一个本地优先、可扩展的 AI Agent 平台，基于 [tRPC-Agent
 | **子代理系统** | 内置3个子Agent(code-reviewer/summarizer/code-generator) · Skill仓库(SKILL.md) · Summon调度(并发控制5) · YAML Recipe配方 |
 | **可观测性** | OpenTelemetry分布式追踪 · Langfuse LLM追踪 · 结构化日志(slog) · 健康检查 |
 | **制品存储** | Inmemory(默认) · Tencent COS(云端) |
-| **分布式** | A2A Server(tRPC-A2A-Go) · AG-UI SSE服务器 · Redis Session | 
+| **分布式** | A2A Server(tRPC-A2A-Go) · **ACP Server** · AG-UI SSE服务器 · Redis Session | 
 | **评估** | JSON EvalSet · 4种指标(tool_trajectory_match/response_contains_pattern/...) · 回归测试CLI |
 | **HITL** | Graph节点中断/恢复 · 静态/动态两种模式 · Checkpoint状态持久化 |
 | **TUI** | Bubbletea + Lipgloss · Ctrl+C流式取消 · 友好错误处理(401/429/500) |
@@ -163,6 +164,40 @@ extensions:
 wukong://extension?name=github&type=external&transport=stdio&command=npx&args=-y&args=@modelcontextprotocol/server-github
 ```
 
+### ACP（代理客户端协议）集成
+
+Wukong 完整支持 ACP（Agent Client Protocol），实现双向集成：
+
+**1. ACP Server — 让 ACP 客户端原生连接 Wukong**
+
+```yaml
+acp_server:
+  enabled: true
+  address: ":9091"
+```
+
+启动后暴露端点：
+- `POST /acp/message/send` — 用户消息 + SSE 流式响应
+- `GET /acp/tools/list` — Agent Card + 全部工具列表
+- `POST /acp/tools/call` — 直接工具调用
+- `GET /acp/.well-known/agent.json` — 能力发现
+
+**2. ACP Provider — 将 ACP 代理作为 LLM 提供商**
+
+```yaml
+providers:
+  - name: "acp-coder"
+    type: "acp"
+    agent_url: "http://localhost:4000"
+    model: "acp-default"
+```
+
+Wukong 扩展自动通过 MCP Bridge（`:3400/mcp`）透传给 ACP 代理调用。
+
+**3. ACP MCP Bridge — 扩展工具透传**
+
+系统扩展（Developer、Memory、Browser 等）自动注册为 MCP Tool，ACP 代理通过标准 JSON-RPC 协议发现和调用。
+
 ---
 
 ## 工作流模式
@@ -233,16 +268,16 @@ wukong/
 │   ├── codemode/                goja JS沙箱
 │   ├── config/                  Viper配置 · 30+配置段
 │   ├── eval/                    EvalSet/Metric/Evaluator
-│   ├── extension/               MCP管理器+12内置+MCP Client
+│   ├── extension/               MCP管理器+12内置+MCP Client+ACP Bridge
 │   ├── health/                  健康检查
 │   ├── knowledge/               RAG(Embedding+VectorStore+Source)
 │   ├── memory/                  长期记忆(GracefulShutdown)
 │   ├── observability/           Langfuse OTLP
 │   ├── project/                 项目追踪
-│   ├── provider/                6种LLM工厂
+│   ├── provider/                7种LLM工厂（含ACP）
 │   ├── recall/                  FTS5跨会话搜索
 │   ├── security/                4级权限+命令拦截+.wukongignore
-│   ├── server/                  AG-UI SSE
+│   ├── server/                  AG-UI SSE + ACP Server
 │   ├── session/                 sqlite/redis会话
 │   ├── skill/                   Agent Skill仓库
 │   ├── summon/                  A2A+子代理调度+并发控制

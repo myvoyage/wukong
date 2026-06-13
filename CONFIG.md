@@ -31,7 +31,7 @@ log_level: "info"              # 日志级别: debug | info | warn | error
 
 ## 2. Provider 配置
 
-支持6种类型：`openai`, `anthropic`, `google`, `deepseek`, `ollama`, `lmstudio`
+支持7种类型：`openai`, `anthropic`, `google`, `deepseek`, `ollama`, `lmstudio`, `acp`
 
 ```yaml
 default_provider: "openai"     # 默认使用的 Provider（必须匹配下方某个 name）
@@ -69,6 +69,14 @@ providers:
     api_key: "lmstudio"
     base_url: "http://localhost:1234/v1"
     model: "your-model-name"
+
+  # ACP 代理客户端协议
+  - name: "acp-coder"
+    type: "acp"
+    agent_url: "http://localhost:4000"       # ACP Agent 端点
+    model: "acp-default"
+    # mcp_port: ":3400"                      # MCP Bridge 端口（可覆盖）
+    # agent_auth: "api_key"                  # 可选认证方式
 ```
 
 | Provider | 默认 Base URL |
@@ -638,6 +646,58 @@ agui:
 ```
 
 兼容 AG-UI 协议规范，支持 CopilotKit、TDesign Chat 等客户端。提供 `/health` 健康检查端点。
+
+---
+
+## 22-A. ACP Server 配置
+
+```yaml
+acp_server:
+  enabled: true                  # 启用 ACP 协议服务端点
+  address: ":9091"               # 监听地址
+  path: "/acp"                   # ACP 端点路径前缀
+  enable_streaming: true         # SSE 流式响应
+  # auth_type: "api_key"         # 认证方式: api_key / jwt / ""（无）
+  # api_key: "${ACP_API_KEY}"    # API Key
+```
+
+### ACP Server 端点
+
+| 端点 | 方法 | 说明 |
+|------|------|------|
+| `/acp/message/send` | POST | 用户消息 + SSE 流式 Agent 响应 |
+| `/acp/tools/list` | GET | Agent Card + 全部工具列表 |
+| `/acp/tools/call` | POST | 直接工具调用（无需完整对话流） |
+| `/acp/.well-known/agent.json` | GET | Agent 能力发现（名称/描述/端点/工具数） |
+| `/acp/health` | GET | 健康检查 |
+
+### SSE 事件格式
+
+```
+event: text_delta
+data: {"content":"Hello"}
+
+event: tool_calls
+data: {"tools":[{"id":"...","name":"file_read","arguments":"..."}]}
+
+event: done
+data: {"session_id":"...","full_text":"Complete response..."}
+```
+
+---
+
+## 22-B. ACP MCP Bridge 配置
+
+```yaml
+acp_mcp:
+  enabled: true                  # 启用 MCP Bridge（ACP 代理调用扩展所需）
+  address: ":3400"               # MCP Server 监听地址
+  path: "/mcp"                   # MCP 端点路径
+```
+
+将 Wukong 全部扩展自动注册为 MCP Tool，ACP 代理通过 JSON-RPC 协议调用：
+- `tools/list` — 列出所有可用的 Wukong 扩展工具
+- `tools/call` — 调用指定工具（如 file_read、code_search 等）
 
 ---
 
