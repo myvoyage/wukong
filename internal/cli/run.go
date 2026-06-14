@@ -12,6 +12,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/spf13/cobra"
 
+	"github.com/km269/wukong/internal/util"
+
 	"trpc.group/trpc-go/trpc-agent-go/event"
 	"trpc.group/trpc-go/trpc-agent-go/model"
 )
@@ -84,6 +86,12 @@ Examples:
 			msg := model.NewUserMessage(input)
 			ctx := context.Background()
 
+			// Resolve userID for the runner.
+			runUserID := resolveUserID()
+			util.Logger.Info("run: userID resolved",
+				"user_id", runUserID,
+			)
+
 			// Stream to stdout if streaming is enabled.
 			if !noStream && wukongCfg.Agent.Streaming {
 				onEvent := func(evt *event.Event) error {
@@ -98,7 +106,7 @@ Examples:
 					return nil
 				}
 				response, err := loop.RunStream(
-					ctx, "", sessionID, msg, onEvent)
+					ctx, runUserID, sessionID, msg, onEvent)
 				fmt.Println() // final newline
 				if err != nil {
 					return fmt.Errorf(
@@ -108,7 +116,7 @@ Examples:
 			} else {
 				// Non-streaming: collect and print at end.
 				response, err := loop.RunStream(
-					ctx, "", sessionID, msg, nil)
+					ctx, runUserID, sessionID, msg, nil)
 				if err != nil {
 					return fmt.Errorf(
 						"agent error: %w", err)
@@ -177,6 +185,31 @@ func resolveInput(flagMsg string, args []string) string {
 	}
 
 	return ""
+}
+
+// resolveUserID determines a reasonably unique user identifier.
+// Priority: USER env var (Unix), USERDOMAIN\USERNAME (Windows),
+// hostname fallback, "default" last resort.
+func resolveUserID() string {
+	userID := os.Getenv("USER")
+	if userID == "" {
+		userDomain := os.Getenv("USERDOMAIN")
+		userName := os.Getenv("USERNAME")
+		if userDomain != "" && userName != "" {
+			userID = userDomain + "\\" + userName
+		} else if userName != "" && userName != "SYSTEM" {
+			userID = userName
+		}
+	}
+	if userID == "" || userID == "SYSTEM" {
+		if hostname, err := os.Hostname(); err == nil {
+			userID = hostname
+		}
+	}
+	if userID == "" {
+		userID = "default"
+	}
+	return userID
 }
 
 // cleanupBootstrap shuts down the bootstrapped resources.

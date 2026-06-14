@@ -263,7 +263,7 @@ browser:
   viewport_width: 1280                 # 视口宽度
   viewport_height: 720                 # 视口高度
   search_backend: "duckduckgo"         # duckduckgo / searxng / tavily
-  # search_backend_url: ""             # SearXNG 实例URL
+  search_backend_url: "http://43.167.226.121:8080/"             # SearXNG 实例URL
   # search_api_key: ""                 # Tavily API Key
 
 # ---------------------------------------------------------------------------
