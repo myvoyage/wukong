@@ -170,7 +170,7 @@ memory:
   backend: "sqlite"
   db_path: "wukong.db"
   max_memories: 100
-  auto_extract: true
+  auto_extract: false
   extract_timeout: "120s"
   # 可选的独立记忆提取模型配置。如果不设置，使用默认 provider。
   # 建议使用更小/更快的模型（如 deepseek-chat）来降低成本和延迟。
