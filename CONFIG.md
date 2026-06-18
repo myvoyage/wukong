@@ -353,14 +353,50 @@ recall:
 ```yaml
 revision:
   enabled: true                           # 启用上下文窗口管理
-  revision_provider: ""                   # 修订模型Provider（空=使用默认）
-  revision_model: ""                      # 修订模型名称
+
+  # 辅助摘要模型Provider（空=使用默认）
+  revision_provider: ""
+  # 辅助摘要模型名称（留空=无LLM摘要，仅算法截断）
+  revision_model: ""
+
+  # 启用LLM智能摘要（需要 revision_model 配置正确）
+  # 开启后 FilterIrrelevant 将调用辅助模型生成上下文摘要，
+  # 而非简单的算法截断。关闭后回退到原始截断策略。
+  enable_llm_summarize: false
+
+  # 摘要冷却期：两次渐进式摘要之间的最小间隔
+  # 避免频繁调用辅助模型造成延迟和费用
+  summary_cooldown: 120s
+
+  # 摘要超时：单次摘要调用的最大等待时间
+  summary_timeout: 30s
+
   max_command_output: 8000                # 命令输出最大保留字节数
   enable_semantic_search: false           # 语义搜索（实验性）
   search_strategy: "include_all"          # 搜索策略: include_all | semantic
   max_context_tokens: 64000               # 上下文Token软限制
   trim_ratio: 0.3                         # 裁剪比例 (0.0-1.0)
 ```
+
+### 摘要策略
+
+Wukong 支持三层上下文压缩策略，按优先级排列：
+
+| 层级 | 策略 | 描述 | 触发条件 |
+|------|------|------|----------|
+| 1 | **LLM 智能摘要** | 使用辅助模型生成结构化摘要，保留关键决策、事实和待办项 | `enable_llm_summarize: true` 且 `revision_model` 已配置 |
+| 2 | **渐进式压缩** | 将已有摘要与新消息增量合并，避免重复压缩全量对话 | 自动（辅助模型可用时） |
+| 3 | **算法截断** | 简单占位文本替换旧消息（保留 token 计数但不保留内容） | LLM 不可用时回退 |
+
+### 辅助模型推荐
+
+为节约成本，推荐使用轻量级模型作为 revision model：
+
+| 模型 | 推荐场景 |
+|------|----------|
+| `gpt-4o-mini` | 高精度需求，理解能力强 |
+| `deepseek-chat` | 性价比高，中文摘要优秀 |
+| `qwen-turbo` | 低延迟，简单摘要 |
 
 3种触发修订条件：
 1. 估算Token超过 `max_context_tokens × (1 - trim_ratio)`

@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"testing"
 
 	"github.com/km269/wukong/internal/config"
@@ -80,10 +81,11 @@ func TestContextRevisionEngine_TruncateCommandOutput(t *testing.T) {
 func TestContextRevisionEngine_FilterIrrelevant(t *testing.T) {
 	cfg := &config.WukongConfig{}
 	engine := NewContextRevisionEngine(cfg)
+	bgCtx := context.Background()
 
 	// With <= 10 messages, should be unchanged
 	short := []string{"a", "b", "c"}
-	result := engine.FilterIrrelevant(short)
+	result := engine.FilterIrrelevant(bgCtx, short)
 	if len(result) != len(short) {
 		t.Errorf("short messages should be unchanged, got %d", len(result))
 	}
@@ -93,7 +95,7 @@ func TestContextRevisionEngine_FilterIrrelevant(t *testing.T) {
 	for i := range long {
 		long[i] = "message"
 	}
-	result = engine.FilterIrrelevant(long)
+	result = engine.FilterIrrelevant(bgCtx, long)
 	if len(result) >= len(long) {
 		t.Errorf("long messages should be reduced, got %d", len(result))
 	}

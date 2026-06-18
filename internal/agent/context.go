@@ -216,36 +216,184 @@ func (e *ContextRevisionEngine) TruncateCommandOutput(
 }
 
 // FilterIrrelevant removes obviously irrelevant content from context.
-// This implements algorithmic stale content pruning.
+// When LLM summarization is enabled and a revision model is available,
+// it generates an intelligent, structured summary of older messages
+// instead of dropping them with a placeholder.
+//
+// Strategy (in priority order):
+//  1. LLM Summarization: uses the revision model to produce a concise
+//     but detailed summary of older messages, preserving key decisions,
+//     facts, errors, and action items.
+//  2. Algorithmic Truncation: when LLM summarization is disabled or
+//     the revision model is unavailable, falls back to a simple
+//     token-count placeholder.
 func (e *ContextRevisionEngine) FilterIrrelevant(
-	messages []string,
+	ctx context.Context, messages []string,
 ) []string {
 	if len(messages) <= 10 {
 		return messages
 	}
 
-	// Keep most recent messages, summarize older ones
+	// Split into old and recent halves
 	keepRecent := len(messages) / 2
-	result := make([]string, 0, keepRecent+1)
+	olderMessages := messages[:len(messages)-keepRecent]
+	recentMessages := messages[len(messages)-keepRecent:]
 
-	// Summarize older messages
-	if keepRecent > 0 {
-		olderContent := strings.Join(
-			messages[:len(messages)-keepRecent], "\n",
-		)
-		summary := fmt.Sprintf(
-			"[Previous conversation summary: %d messages, ~%d tokens]",
-			len(messages)-keepRecent, len(olderContent)/4,
-		)
-		result = append(result, summary)
+	// Attempt LLM-based summarization
+	e.mu.RLock()
+	llmEnabled := e.cfg.Revision.EnableLLMSummarize
+	model := e.revisionModel
+	e.mu.RUnlock()
+
+	if llmEnabled && model != nil {
+		// Build content for summarization
+		olderContent := strings.Join(olderMessages, "\n")
+		summary, err := e.SummarizeContent(ctx, olderContent)
+		if err == nil && summary != "" &&
+			len(summary) < len(olderContent) {
+			// LLM summary is meaningful and actually shorter
+			result := make(
+				[]string, 0, 1+len(recentMessages),
+			)
+			result = append(result,
+				fmt.Sprintf(
+					"[Conversation summary "+
+						"(%d earlier messages)]:\n%s",
+					len(olderMessages), summary,
+				),
+			)
+			result = append(result, recentMessages...)
+			return result
+		}
+		// Fall through to algorithmic truncation on failure
 	}
 
-	// Keep recent messages as-is
-	result = append(
-		result, messages[len(messages)-keepRecent:]...,
+	// Algorithmic fallback: simple placeholder
+	olderContent := strings.Join(olderMessages, "\n")
+	summary := fmt.Sprintf(
+		"[Previous conversation summary: %d messages, ~%d tokens]",
+		len(olderMessages), len(olderContent)/4,
 	)
-
+	result := make([]string, 0, 1+len(recentMessages))
+	result = append(result, summary)
+	result = append(result, recentMessages...)
 	return result
+}
+
+// ProgressiveSummarize merges an existing summary with new messages
+// using the revision model to produce an updated, compressed summary.
+// This implements layered context compression: instead of re-summarizing
+// the entire conversation from scratch, it only processes the delta
+// (new messages since the last summary).
+//
+// Falls back gracefully:
+//   - Cooldown not elapsed → returns existing summary as-is (no-op)
+//   - LLM disabled or model unavailable → algorithmic merge
+//   - Summarization error → algorithmic merge
+//   - Context timeout → algorithmic merge
+func (e *ContextRevisionEngine) ProgressiveSummarize(
+	ctx context.Context,
+	existingSummary string,
+	newMessages []string,
+) (string, error) {
+	if len(newMessages) == 0 {
+		return existingSummary, nil
+	}
+
+	e.mu.RLock()
+	llmEnabled := e.cfg.Revision.EnableLLMSummarize
+	model := e.revisionModel
+	cooldown := e.cfg.Revision.SummaryCooldown
+	timeout := e.cfg.Revision.SummaryTimeout
+	maxTokens := e.cfg.Revision.MaxContextTokens
+	e.mu.RUnlock()
+
+	// Cooldown gate: avoid calling the revision model too frequently.
+	// If the last summarization was recent, return the existing summary
+	// unchanged to minimize latency and API cost.
+	if cooldown > 0 && time.Since(e.lastSummarized) < cooldown {
+		return existingSummary, nil
+	}
+
+	// If LLM summarization is unavailable, use algorithmic merge.
+	if !llmEnabled || model == nil {
+		return e.algorithmicMerge(
+			existingSummary, newMessages, maxTokens,
+		), nil
+	}
+
+	// Build the content for progressive summarization.
+	// The "[Existing Summary]" prefix signals the revision model
+	// to use the merge-mode prompt (see factory.go:Summarize).
+	var content strings.Builder
+	if existingSummary != "" {
+		content.WriteString("[Existing Summary]\n")
+		content.WriteString(existingSummary)
+		content.WriteString("\n\n[New Messages]\n")
+	}
+	for _, msg := range newMessages {
+		content.WriteString(msg)
+		content.WriteString("\n")
+	}
+
+	// Apply timeout for the summarization call.
+	summarizeCtx := ctx
+	if timeout > 0 {
+		var cancel context.CancelFunc
+		summarizeCtx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
+	}
+
+	summary, err := model.Summarize(
+		summarizeCtx, content.String(), maxTokens/4,
+	)
+	if err != nil {
+		log.Warnf(
+			"progressive summarize failed, "+
+				"falling back to algorithmic merge: %v",
+			err,
+		)
+		return e.algorithmicMerge(
+			existingSummary, newMessages, maxTokens,
+		), nil
+	}
+
+	// Update last summarized time on success
+	e.mu.Lock()
+	e.lastSummarized = time.Now()
+	e.mu.Unlock()
+
+	return summary, nil
+}
+
+// algorithmicMerge performs a non-LLM merge of an existing summary
+// with new messages. Used as a fallback when the revision model
+// is not available or summarization fails.
+func (e *ContextRevisionEngine) algorithmicMerge(
+	existingSummary string,
+	newMessages []string,
+	maxTokens int,
+) string {
+	var merged strings.Builder
+
+	if existingSummary != "" {
+		merged.WriteString(existingSummary)
+		merged.WriteString("\n\n--- Recent Activity ---\n")
+	}
+
+	// Join new messages with truncation
+	newContent := strings.Join(newMessages, "\n")
+	maxChars := maxTokens * 4
+	if len(newContent) > maxChars {
+		newContent = newContent[:maxChars] +
+			fmt.Sprintf(
+				"\n... [%d chars truncated]",
+				len(newContent)-maxChars,
+			)
+	}
+	merged.WriteString(newContent)
+
+	return merged.String()
 }
 
 // ShouldSummarize returns whether the context should be summarized.

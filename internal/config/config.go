@@ -535,6 +535,10 @@ type RevisionConfig struct {
 	RevisionProvider string `mapstructure:"revision_provider"`
 	// RevisionModel is an optional dedicated model for revision summaries.
 	RevisionModel string `mapstructure:"revision_model"`
+	// EnableLLMSummarize enables intelligent LLM-based summarization when
+	// a revision model is available. When disabled or no revision model is
+	// configured, falls back to algorithmic truncation.
+	EnableLLMSummarize bool `mapstructure:"enable_llm_summarize"`
 	// MaxCommandOutput is the maximum bytes retained from command execution output.
 	MaxCommandOutput int `mapstructure:"max_command_output"`
 	// EnableSemanticSearch enables semantic context retrieval (experimental).
@@ -545,6 +549,10 @@ type RevisionConfig struct {
 	MaxContextTokens int `mapstructure:"max_context_tokens"`
 	// TrimRatio is the fraction of context to trim when exceeding limits (0.0-1.0).
 	TrimRatio float64 `mapstructure:"trim_ratio"`
+	// SummaryCooldown is the minimum interval between progressive summarizations.
+	SummaryCooldown time.Duration `mapstructure:"summary_cooldown"`
+	// SummaryTimeout is the maximum time allowed for a single summarization call.
+	SummaryTimeout time.Duration `mapstructure:"summary_timeout"`
 }
 
 // ============================================================================
@@ -1221,6 +1229,9 @@ func (l *Loader) setDefaults() {
 
 	// --- Revision defaults ---
 	l.v.SetDefault("revision.enabled", true)
+	l.v.SetDefault("revision.enable_llm_summarize", false)
+	l.v.SetDefault("revision.summary_cooldown", "120s")
+	l.v.SetDefault("revision.summary_timeout", "30s")
 	l.v.SetDefault("revision.max_command_output", 8000)
 	l.v.SetDefault("revision.enable_semantic_search", false)
 	l.v.SetDefault("revision.search_strategy", "include_all")

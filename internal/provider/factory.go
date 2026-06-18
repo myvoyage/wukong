@@ -6,6 +6,7 @@ package provider
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/km269/wukong/internal/config"
 	"github.com/km269/wukong/internal/util"
@@ -187,14 +188,45 @@ type revisionModelAdapter struct {
 func (a *revisionModelAdapter) Summarize(
 	ctx context.Context, content string, maxTokens int,
 ) (string, error) {
-	// Build a summarization prompt
-	prompt := fmt.Sprintf(
-		"Please summarize the following conversation content "+
-			"concisely in %d tokens or less. "+
-			"Focus on key decisions, important context, "+
-			"and actionable items:\n\n%s",
-		maxTokens, content,
-	)
+	// --- Layered Compression Prompt ---
+	// Supports two scenarios:
+	//   1. Fresh summarization: compress raw conversation messages.
+	//   2. Progressive summarization: merge an existing summary with new delta
+	//      messages to produce an updated summary.
+	// The prompt detects whether "content" starts with "[Existing Summary]"
+	// to distinguish the two modes.
+	var prompt string
+	if strings.HasPrefix(content, "[Existing Summary]") {
+		// Progressive mode: merge existing summary with new messages.
+		prompt = fmt.Sprintf(
+			"You are a context compression assistant. "+
+				"Below is an existing conversation summary "+
+				"followed by new messages that occurred after "+
+				"that summary was generated.\n\n"+
+				"Merge them into ONE coherent, updated summary "+
+				"in %d tokens or less. "+
+				"Preserve all key decisions, important facts, "+
+				"pending action items, file paths, error messages, "+
+				"and architectural decisions. "+
+				"Write in a concise bullet-point format.\n\n%s",
+			maxTokens, content,
+		)
+	} else {
+		// Fresh summarization: compress raw conversation.
+		prompt = fmt.Sprintf(
+			"You are a context compression assistant. "+
+				"Summarize the following conversation "+
+				"concisely in %d tokens or less. "+
+				"Capture: (1) key decisions made, "+
+				"(2) important context/facts, "+
+				"(3) pending action items, "+
+				"(4) errors encountered, "+
+				"(5) file paths or code changes mentioned. "+
+				"Use a structured bullet-point format. "+
+				"Be thorough but concise.\n\n%s",
+			maxTokens, content,
+		)
+	}
 
 	req := &model.Request{
 		Messages: []model.Message{

@@ -241,8 +241,26 @@ recall:
 # ---------------------------------------------------------------------------
 revision:
   enabled: true
-  revision_provider: ""
-  revision_model: ""
+
+  # 辅助摘要模型：用于智能上下文压缩。
+  # 指定一个廉价/快速的模型（如 gpt-4o-mini、deepseek-chat），
+  # 专门负责对旧对话生成结构化摘要，避免主模型 token 浪费。
+  # 留空则使用默认 provider/model。
+  revision_provider: "lmstudio"
+  revision_model: "qwen/qwen3.5-9b"
+
+  # 启用 LLM 智能摘要（需要 revision_model 配置正确）。
+  # 开启后 FilterIrrelevant 将调用辅助模型生成上下文摘要，
+  # 而非简单的算法截断。关闭后回退到原始截断策略。
+  enable_llm_summarize: true #false
+
+  # 摘要冷却期：两次渐进式摘要之间的最小间隔。
+  # 避免频繁调用辅助模型造成延迟和费用。
+  summary_cooldown: 120s
+
+  # 摘要超时：单次摘要调用的最大等待时间。
+  summary_timeout: 30s
+
   max_command_output: 8000
   enable_semantic_search: false
   search_strategy: "include_all"
