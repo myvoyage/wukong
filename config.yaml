@@ -246,7 +246,7 @@ cortex:
   # 向量嵌入配置（用于语义搜索）
   # 需要 OpenAI 兼容的 embedding API
   embedding_base_url: "http://192.168.50.97:1234"
-  embedding_api_key: "llmstudio"
+  embedding_api_key: "lmstudio"
   embedding_model: "qwen3-embedding-0.6b-graphql"
 
 # ---------------------------------------------------------------------------
@@ -262,8 +262,8 @@ memoryflow:
 
   # 可选：指定用于规划和提取的 LLM 模型
   # 留空则使用确定性启发式算法
-  # planner_model: "gpt-4o-mini"
-  # extractor_model: "gpt-4o-mini"
+  planner_model: "gemma-4-e4b-it"
+  extractor_model: "gemma-4-e4b-it"
 
 # ---------------------------------------------------------------------------
 # GraphFlow - CortexDB 知识图谱构建配置
@@ -329,7 +329,7 @@ browser:
   enabled: true
   browser_type: "chromium"
   headless: true
-  cache_dir: ".wukong_cache"
+  cache_dir: ".wukong/cache"
   max_download_size: 104857600
   timeout: "60s"
   # browser_path: ""                   # 自定义Chrome路径
@@ -344,7 +344,7 @@ browser:
 # ---------------------------------------------------------------------------
 visualiser:
   enabled: true
-  output_dir: ".wukong_visuals"
+  output_dir: ".wukong/visuals"
   max_width: 1200
   max_height: 800
 
@@ -360,7 +360,7 @@ tutorial:
 # ---------------------------------------------------------------------------
 top_of_mind:
   enabled: true
-  instruction_file: ".wukong_instructions.md"
+  instruction_file: ".wukong/instructions.md"
   max_length: 2000
 
 # ---------------------------------------------------------------------------
@@ -376,14 +376,14 @@ code_mode:
 # ---------------------------------------------------------------------------
 apps:
   enabled: true
-  app_dir: ".wukong_apps"
+  app_dir: ".wukong/apps"
 
 # ---------------------------------------------------------------------------
 # Summon - 子代理调度配置
 # ---------------------------------------------------------------------------
 summon:
   enabled: true
-  skills_dir: ".wukong_skills"             # 统一技能目录（与 skill 共用）
+  skills_dir: ".wukong/skills"             # 统一技能目录（与 skill 共用）
   max_concurrent: 5
   a2a_remotes: []
   # a2a_remotes 示例:
@@ -398,7 +398,7 @@ summon:
 # ---------------------------------------------------------------------------
 skill:
   enabled: true
-  skills_dir: ".wukong_skills"             # 统一技能目录（与 summon 共用）
+  skills_dir: ".wukong/skills"             # 统一技能目录（与 summon 共用）
   auto_load: true
   max_skills: 20
 
@@ -424,8 +424,8 @@ evolution:
 knowledge:
   enabled: false
   # Embedding 模型配置 (用于文本向量化)
-  # embedder_provider: "openai"             # Embedding provider 名称
-  embedder_model: "text-embedding-3-small"   # 1536 维向量
+  embedder_provider: "lmstudio"             # Embedding provider 名称
+  embedder_model: "qwen3-embedding-0.6b-graphql"   # 1536 维向量
   # 文档源 (支持 txt, md, pdf, csv, json, docx)
   # sources:
   #   - "./docs"
@@ -523,8 +523,8 @@ acp_mcp:
 # ---------------------------------------------------------------------------
 eval:
   enabled: false
-  evalset_path: ".wukong_evals/default.evalset.json"     # 测试用例文件
-  results_path: ".wukong_evals/results.json"              # 结果输出
+  evalset_path: ".wukong/evals/default.evalset.json"     # 测试用例文件
+  results_path: ".wukong/evals/results.json"              # 结果输出
   # metrics:
   #   - name: "tool_trajectory_match"
   #     threshold: 0.8
