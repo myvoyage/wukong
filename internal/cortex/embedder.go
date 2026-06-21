@@ -95,8 +95,20 @@ func (e *Embedder) Embed(
 		return nil, fmt.Errorf("embed: parse response: %w", err)
 	}
 
+	if len(embResp.Data) == 0 {
+		return nil, fmt.Errorf(
+			"embed: API returned 0 embeddings for %d texts",
+			len(texts),
+		)
+	}
+
 	vectors := make([][]float64, len(embResp.Data))
 	for i, d := range embResp.Data {
+		if len(d.Embedding) == 0 {
+			return nil, fmt.Errorf(
+				"embed: empty embedding at index %d", i,
+			)
+		}
 		vectors[i] = d.Embedding
 	}
 

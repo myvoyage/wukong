@@ -167,11 +167,26 @@ func (m *MemoryFlowService) PromoteFacts(
 	sessionID string,
 	userID string,
 ) ([]memoryflow.PromotionCandidate, error) {
-	// Build a transcript from the session.
-	transcript := memoryflow.Transcript{
-		SessionID: sessionID,
-		UserID:    userID,
-		Source:    "chat",
+	// Retrieve the actual ingested transcript turns from stored
+	// episodes. Previously, the transcript was created with an
+	// empty Turns slice, causing the extractor to always return
+	// zero candidates.
+	transcriptResp, err := m.flow.GetTranscript(ctx,
+		memoryflow.GetTranscriptRequest{
+			SessionID: sessionID,
+			UserID:    userID,
+			Scope:     cortexdb.MemoryScopeSession,
+			Namespace: m.cfg.Namespace,
+		})
+	if err != nil {
+		return nil, fmt.Errorf(
+			"memoryflow: get transcript: %w", err)
+	}
+	if transcriptResp == nil ||
+		len(transcriptResp.Transcript.Turns) == 0 {
+		return nil, fmt.Errorf(
+			"memoryflow: no transcript turns for session %s",
+			sessionID)
 	}
 
 	// Construct session state for extraction.
@@ -181,7 +196,7 @@ func (m *MemoryFlowService) PromoteFacts(
 	}
 
 	candidates, err := m.extractor.Extract(
-		ctx, transcript, state)
+		ctx, transcriptResp.Transcript, state)
 	if err != nil {
 		return nil, fmt.Errorf(
 			"memoryflow: extract candidates: %w", err)
@@ -190,12 +205,43 @@ func (m *MemoryFlowService) PromoteFacts(
 	return candidates, nil
 }
 
+// NewMemoryFlowWithDB creates a MemoryFlow service using a
+// pre-existing CortexDB instance instead of opening a new one.
+// When both CortexStore and MemoryFlow are enabled, they share
+// the same CortexDB to avoid conflicting connections to the
+// same database file.
+func NewMemoryFlowWithDB(
+	cfg *config.MemoryFlowConfig,
+	db *cortexdb.DB,
+	planner memoryflow.QueryPlanner,
+	extractor memoryflow.SessionExtractor,
+) (*MemoryFlowService, error) {
+	flow, err := memoryflow.New(db, planner, extractor)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"memoryflow: create flow (shared db): %w", err)
+	}
+
+	return &MemoryFlowService{
+		cfg:       cfg,
+		db:        db,
+		flow:      flow,
+		planner:   planner,
+		extractor: extractor,
+	}, nil
+}
+
 // Close releases resources held by the MemoryFlow service.
 func (m *MemoryFlowService) Close() error {
 	if m.db != nil {
 		return m.db.Close()
 	}
 	return nil
+}
+
+// DB returns the underlying CortexDB instance.
+func (m *MemoryFlowService) DB() *cortexdb.DB {
+	return m.db
 }
 
 // Planner returns the query planner for external use.

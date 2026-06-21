@@ -14,7 +14,7 @@ import (
 	"math"
 	"strings"
 
-	_ "github.com/mattn/go-sqlite3"
+	_ "modernc.org/sqlite"
 
 	"github.com/km269/wukong/internal/recall"
 )

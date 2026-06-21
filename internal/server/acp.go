@@ -351,7 +351,13 @@ func (s *ACPServer) handleToolsList(
 			Description: decl.Description,
 		}
 		if decl.InputSchema != nil {
-			schemaJSON, _ := json.Marshal(decl.InputSchema)
+			schemaJSON, err := json.Marshal(decl.InputSchema)
+			if err != nil {
+				slog.Warn("acp: marshal tool schema failed",
+					"tool", decl.Name,
+					"error", err.Error())
+				continue
+			}
 			info.InputSchema = schemaJSON
 		}
 		toolInfos = append(toolInfos, info)

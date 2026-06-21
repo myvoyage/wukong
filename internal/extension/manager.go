@@ -270,6 +270,7 @@ func (m *Manager) SetMemoryService(svc any, appName, userID string) {
 }
 
 // toolSetKeys returns the names of all registered tool sets.
+// Caller must hold m.mu (at least RLock).
 func (m *Manager) toolSetKeys() []string {
 	keys := make([]string, 0, len(m.toolSets))
 	for k := range m.toolSets {

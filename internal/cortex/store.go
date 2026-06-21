@@ -89,8 +89,13 @@ func (s *CortexStore) storeCortexVector(msg recall.ChatMessage) error {
 		embedText = embedText[:8000]
 	}
 
+	bgCtx, cancel := context.WithTimeout(
+		context.Background(), 60*time.Second,
+	)
+	defer cancel()
+
 	vecs, err := s.embedder.Embed(
-		context.Background(), []string{embedText})
+		bgCtx, []string{embedText})
 	if err != nil {
 		return nil // non-fatal
 	}
@@ -100,7 +105,7 @@ func (s *CortexStore) storeCortexVector(msg recall.ChatMessage) error {
 
 	// Store in CortexDB with HNSW vector index.
 	return s.db.InsertTextWithVector(
-		context.Background(),
+		bgCtx,
 		fmt.Sprintf("msg_%d", msg.ID),
 		embedText,
 		vecToFloat32(vecs[0]),
@@ -132,8 +137,13 @@ func (s *CortexStore) Search(
 func (s *CortexStore) searchCortex(
 	query, userID string, limit int,
 ) ([]recall.SearchResult, error) {
+	bgCtx, cancel := context.WithTimeout(
+		context.Background(), 30*time.Second,
+	)
+	defer cancel()
+
 	vecs, err := s.embedder.Embed(
-		context.Background(), []string{query})
+		bgCtx, []string{query})
 	if err != nil {
 		return s.lexical.search(query, userID, limit)
 	}
@@ -143,7 +153,7 @@ func (s *CortexStore) searchCortex(
 
 	// Use CortexDB's HNSW vector search.
 	results, err := s.db.Vector().Search(
-		context.Background(),
+		bgCtx,
 		vecToFloat32(vecs[0]),
 		core.SearchOptions{TopK: limit},
 	)
@@ -186,11 +196,26 @@ func (s *CortexStore) DeleteSession(sessionID string) error {
 
 // Close performs a clean shutdown. The lexical store's shared DB
 // is NOT closed here — the DatabasePool owner manages its lifecycle.
+// When markOwned is false (shared mode), the CortexDB instance is
+// NOT closed — the owner (e.g., MemoryFlowService) manages it.
 func (s *CortexStore) Close() error {
 	if s.db != nil {
 		s.db.Close()
 	}
 	return s.lexical.close() // no-op: DB managed by DatabasePool
+}
+
+// SetDB replaces the CortexDB instance. Call this to share an
+// existing CortexDB (e.g., from MemoryFlowService) instead of
+// opening a separate connection to the same database file.
+func (s *CortexStore) SetDB(db *cortexdb.DB) {
+	s.db = db
+}
+
+// DB returns the underlying CortexDB instance. Returns nil when
+// no embedder is configured (lexical-only mode).
+func (s *CortexStore) DB() *cortexdb.DB {
+	return s.db
 }
 
 // RecallStore returns a *recall.Store adapter sharing the same DB.

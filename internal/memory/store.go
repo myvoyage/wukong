@@ -16,10 +16,11 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"sort"
 	"sync"
 	"time"
 
-	_ "github.com/mattn/go-sqlite3"
+	_ "modernc.org/sqlite"
 
 	"github.com/km269/wukong/internal/config"
 	"github.com/km269/wukong/internal/util"
@@ -218,6 +219,7 @@ func (m *MemoryManager) logMemoryHealth() {
 
 // CleanMemoriesByAge removes memories older than the given TTL
 // for the specified user. Returns the number of deleted entries.
+// Deprecated: use SmartCleanup instead for capacity-aware eviction.
 func (m *MemoryManager) CleanMemoriesByAge(
 	ctx context.Context,
 	userKey memory.UserKey,
@@ -249,6 +251,132 @@ func (m *MemoryManager) CleanMemoriesByAge(
 		util.Logger.Info("memory: cleaned old memories",
 			"deleted", deleted,
 			"cutoff", cutoff.Format(time.RFC3339),
+		)
+	}
+	return deleted, nil
+}
+
+// SmartCleanup performs capacity-aware memory eviction with
+// importance scoring. Strategy:
+//  1. If under 80% capacity: only delete expired (>TTL).
+//  2. If over 80% capacity: evict lowest-score memories down to
+//     60% capacity, using a combined score of recency (70%) and
+//     content length (30%).
+//  3. Returns the number of deleted entries.
+//
+// This ensures transient or short memories are evicted first,
+// while recently updated and substantive memories are preserved.
+func (m *MemoryManager) SmartCleanup(
+	ctx context.Context,
+	userKey memory.UserKey,
+	ttl time.Duration,
+) (int, error) {
+	if m.cfg.MaxMemories <= 0 {
+		return 0, nil
+	}
+
+	entries, err := m.Service().ReadMemories(ctx, userKey, 0)
+	if err != nil {
+		return 0, fmt.Errorf("smart cleanup read: %w", err)
+	}
+
+	total := len(entries)
+	if total == 0 {
+		return 0, nil
+	}
+
+	// Under 80% capacity: only delete expired.
+	keepTarget := m.cfg.MaxMemories * 60 / 100
+	softLimit := m.cfg.MaxMemories * 80 / 100
+
+	if total <= softLimit {
+		return m.CleanMemoriesByAge(ctx, userKey, ttl)
+	}
+
+	// Over 80% capacity: score all entries and evict lowest-scoring
+	// down to 60% of max capacity.
+	now := time.Now()
+	cutoff := now.Add(-ttl)
+	maxAge := 365 * 24 * time.Hour // reference max age for normalisation
+	if ttl > maxAge {
+		maxAge = ttl
+	}
+
+	type scored struct {
+		entry *memory.Entry
+		score float64
+	}
+	var scoredEntries []scored
+
+	for _, e := range entries {
+		// Always evict expired entries regardless of score.
+		if e.UpdatedAt.Before(cutoff) {
+			memKey := memory.Key{
+				AppName:  userKey.AppName,
+				UserID:   userKey.UserID,
+				MemoryID: e.ID,
+			}
+			if delErr := m.Service().DeleteMemory(ctx, memKey); delErr != nil {
+				util.Logger.Warn("memory: smart cleanup delete failed",
+					"id", e.ID, "error", delErr.Error())
+			}
+			continue
+		}
+
+		// Compute importance score: 70% recency + 30% content length.
+		// Recency: 1.0 for just-updated, decaying linearly over maxAge.
+		age := now.Sub(e.UpdatedAt)
+		recencyScore := 1.0 - (float64(age) / float64(maxAge))
+		if recencyScore < 0 {
+			recencyScore = 0
+		}
+
+		// Content length: normalised to [0, 1], capped at 500 chars.
+		var contentLen int
+		if e.Memory != nil {
+			contentLen = len(e.Memory.Memory)
+		}
+		lengthScore := float64(contentLen) / 500.0
+		if lengthScore > 1.0 {
+			lengthScore = 1.0
+		}
+
+		score := recencyScore*0.7 + lengthScore*0.3
+		scoredEntries = append(scoredEntries, scored{
+			entry: e,
+			score: score,
+		})
+	}
+
+	// Sort by score descending (highest importance first).
+	sort.Slice(scoredEntries, func(i, j int) bool {
+		return scoredEntries[i].score > scoredEntries[j].score
+	})
+
+	// Evict entries below the keep target (lowest scores first).
+	var deleted int
+	for i := keepTarget; i < len(scoredEntries); i++ {
+		e := scoredEntries[i].entry
+		memKey := memory.Key{
+			AppName:  userKey.AppName,
+			UserID:   userKey.UserID,
+			MemoryID: e.ID,
+		}
+		if delErr := m.Service().DeleteMemory(ctx, memKey); delErr != nil {
+			util.Logger.Warn("memory: smart cleanup delete failed",
+				"id", e.ID, "score", scoredEntries[i].score,
+				"error", delErr.Error())
+		} else {
+			deleted++
+		}
+	}
+
+	if deleted > 0 {
+		util.Logger.Info("memory: smart cleanup evicted",
+			"deleted", deleted,
+			"total_before", total,
+			"total_after", len(scoredEntries)-deleted,
+			"max", m.cfg.MaxMemories,
 		)
 	}
 	return deleted, nil

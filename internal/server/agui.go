@@ -243,6 +243,9 @@ func (s *AGUIServer) writeSSE(
 ) {
 	jsonData, err := json.Marshal(data)
 	if err != nil {
+		slog.Warn("agui: marshal SSE event failed",
+			"event", eventType,
+			"error", err.Error())
 		return
 	}
 	fmt.Fprintf(w, "event: %s\ndata: %s\n\n", eventType, jsonData)

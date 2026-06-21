@@ -58,7 +58,9 @@ type CoreLoop struct {
 	contextMgr     *ContextManager
 	security       *security.Guard
 	recallStore    *recall.Store
+	cortexStore    *cortex.CortexStore // optional: HNSW vector sync
 	memoryFlow     *cortex.MemoryFlowService
+	graphFlow      *cortex.GraphFlowService // optional: KG auto-extract
 	closeFn        func() error
 
 	mu     sync.RWMutex
@@ -77,10 +79,18 @@ type CoreLoopConfig struct {
 	FunctionTools  []tool.Tool
 	SecurityGuard  *security.Guard
 	RecallStore    *recall.Store
-	RevisionModel  RevisionModel
+	// CortexStore is an optional CortexDB-backed store for
+	// HNSW vector indexing alongside FTS5 recall storage.
+	CortexStore   *cortex.CortexStore
+	RevisionModel RevisionModel
 	// MemoryFlowService provides CortexDB transcript recording
 	// and wake-up context generation.
 	MemoryFlowService *cortex.MemoryFlowService
+	// GraphFlowService provides CortexDB GraphFlow for entity/
+	// relationship extraction and knowledge graph construction.
+	// When AutoExtract is enabled, extraction runs after each
+	// conversation turn.
+	GraphFlowService *cortex.GraphFlowService
 	// TopOfMindInstructions is the formatted persistent instruction block.
 	// If non-empty, it is injected into the system instruction.
 	TopOfMindInstructions string
@@ -300,7 +310,9 @@ func NewCoreLoop(cfg CoreLoopConfig) (*CoreLoop, error) {
 		contextMgr:     ctxMgr,
 		security:       guard,
 		recallStore:    cfg.RecallStore,
+		cortexStore:    cfg.CortexStore,
 		memoryFlow:     cfg.MemoryFlowService,
+		graphFlow:      cfg.GraphFlowService,
 		closeFn: func() error {
 			var errs []error
 			// 1. Close runner first — stops active runs and
@@ -335,6 +347,13 @@ func NewCoreLoop(cfg CoreLoopConfig) (*CoreLoop, error) {
 					if err := closer.Close(); err != nil {
 						errs = append(errs, err)
 					}
+				}
+			}
+			// 4b. Close GraphFlow service — stops the knowledge
+			//     graph extraction engine and its CortexDB.
+			if cfg.GraphFlowService != nil {
+				if err := cfg.GraphFlowService.Close(); err != nil {
+					errs = append(errs, err)
 				}
 			}
 			// 5. Flush and shut down telemetry (including
@@ -401,37 +420,53 @@ func (l *CoreLoop) Run(
 		SessionID: sessionID,
 	})
 
-	// Store user message for recall
+	// Store user message for recall.
 	if l.recallStore != nil {
 		content := extractMessageContent(message)
-		_ = l.recallStore.StoreMessage(recall.ChatMessage{
+		msg := recall.ChatMessage{
 			SessionID: sessionID,
 			UserID:    userID,
 			Role:      "user",
 			Content:   content,
-		})
+		}
+		if err := l.recallStore.StoreMessage(msg); err != nil {
+			util.Logger.Warn("recall: store user message failed",
+				slog.String("error", err.Error()))
+		}
+		// Sync to CortexDB HNSW for semantic search.
+		if l.cortexStore != nil {
+			if err := l.cortexStore.StoreMessage(msg); err != nil {
+				util.Logger.Warn("cortex: store user message failed",
+					slog.String("error", err.Error()))
+			}
+		}
 	}
 
 	// Record transcript in MemoryFlow for context enrichment.
+	var wakeCtx string
 	if l.memoryFlow != nil {
 		content := extractMessageContent(message)
-		_ = l.memoryFlow.IngestTurn(
+		if err := l.memoryFlow.IngestTurn(
 			ctx, sessionID, userID, "user", content,
-		)
+		); err != nil {
+			util.Logger.Warn("memoryflow: ingest user turn failed",
+				slog.String("error", err.Error()))
+		}
 
 		// [Fix 1] Build wake-up context from past conversations
 		// and inject it into the message as additional system context.
 		identity := "You are Wukong, an AI coding assistant."
-		wakeCtx, wErr := l.memoryFlow.WakeUp(
+		wc, wErr := l.memoryFlow.WakeUp(
 			ctx, identity, content, sessionID,
 		)
 		if wErr != nil {
 			util.Logger.Warn("memoryflow: wakeup failed",
 				slog.String("error", wErr.Error()))
-		} else if wakeCtx == "" {
+		} else if wc == "" {
 			util.Logger.Debug("memoryflow: wakeup empty "+
 				"(no prior conversation history yet)")
 		} else {
+			wakeCtx = wc
 			util.Logger.Info("memoryflow: wakeup injected",
 				"chars", len(wakeCtx))
 			if message.Role == model.RoleUser {
@@ -449,6 +484,8 @@ func (l *CoreLoop) Run(
 
 	// [Fix 4] Inject persistent memories from tRPC Memory store
 	// into the conversation context before each agent run.
+	// Deduplicates against MemoryFlow wake-up context to avoid
+	// redundant information from being injected twice.
 	if l.memoryService != nil {
 		userKey := memory.UserKey{
 			AppName: "wukong-app",
@@ -467,22 +504,43 @@ func (l *CoreLoop) Run(
 			var memCtx strings.Builder
 			memCtx.WriteString(
 				"[Remembered facts from previous conversations]\n")
-			for i, m := range memories {
-				if m.Memory != nil && m.Memory.Memory != "" {
-					fmt.Fprintf(&memCtx, "%d. %s\n",
-						i+1, m.Memory.Memory)
+			var deduped int
+			idx := 1
+			for _, m := range memories {
+				if m.Memory == nil || m.Memory.Memory == "" {
+					continue
 				}
+				// Skip memories that are already substantially
+				// present in the MemoryFlow wake-up context.
+				if wakeCtx != "" &&
+					isMemoryDuplicated(m.Memory.Memory, wakeCtx) {
+					deduped++
+					continue
+				}
+				fmt.Fprintf(&memCtx, "%d. %s\n",
+					idx, m.Memory.Memory)
+				idx++
 			}
-			util.Logger.Info("memory: memories injected",
-				"count", len(memories))
-			// Prepend persistent memories to the user message.
-			if message.Role == model.RoleUser {
-				origContent := extractMessageContent(message)
-				message = model.Message{
-					Role: "user",
-					Content: fmt.Sprintf("%s\n\n[User message]\n%s",
-						memCtx.String(), origContent,
-					),
+			injected := idx - 1
+			if injected == 0 {
+				util.Logger.Info("memory: all memories already "+
+					"covered by wake-up context",
+					"total", len(memories),
+					"deduped", deduped)
+			} else {
+				util.Logger.Info("memory: memories injected",
+					"count", injected,
+					"total", len(memories),
+					"deduped", deduped)
+				// Prepend persistent memories to the user message.
+				if message.Role == model.RoleUser {
+					origContent := extractMessageContent(message)
+					message = model.Message{
+						Role: "user",
+						Content: fmt.Sprintf("%s\n\n[User message]\n%s",
+							memCtx.String(), origContent,
+						),
+					}
 				}
 			}
 		}
@@ -605,21 +663,88 @@ func (l *CoreLoop) RunStream(
 		attribute.Int("response_length", len(responseText)),
 	)
 
-	// Store assistant response for recall
+	// Store assistant response for recall.
 	if l.recallStore != nil && responseText != "" {
-		_ = l.recallStore.StoreMessage(recall.ChatMessage{
+		msg := recall.ChatMessage{
 			SessionID: sessionID,
 			UserID:    userID,
 			Role:      "assistant",
 			Content:   responseText,
-		})
+		}
+		if err := l.recallStore.StoreMessage(msg); err != nil {
+			util.Logger.Warn("recall: store assistant message failed",
+				slog.String("error", err.Error()))
+		}
+		// Sync to CortexDB HNSW for semantic search.
+		if l.cortexStore != nil {
+			if err := l.cortexStore.StoreMessage(msg); err != nil {
+				util.Logger.Warn("cortex: store assistant message failed",
+					slog.String("error", err.Error()))
+			}
+		}
+	}
+
+	// Store tool call and tool response messages for recall.
+	// Tool interactions contain valuable context (web search results,
+	// command outputs, file contents) that enrich future searches.
+	if l.recallStore != nil {
+		for _, evt := range allEvents {
+			if evt.Response == nil ||
+				len(evt.Response.Choices) == 0 {
+				continue
+			}
+			choice := evt.Response.Choices[0]
+			// Store tool call requests.
+			for _, tc := range choice.Message.ToolCalls {
+				toolContent := fmt.Sprintf(
+					"Tool: %s\nArgs: %s",
+					tc.Function.Name,
+					string(tc.Function.Arguments),
+				)
+				toolMsg := recall.ChatMessage{
+					SessionID: sessionID,
+					UserID:    userID,
+					Role:      "tool_call",
+					Content:   toolContent,
+				}
+				if err := l.recallStore.StoreMessage(toolMsg); err != nil {
+					util.Logger.Debug(
+						"recall: store tool call failed",
+						slog.String("error", err.Error()))
+				}
+				if l.cortexStore != nil {
+					_ = l.cortexStore.StoreMessage(toolMsg)
+				}
+			}
+			// Store tool response content.
+			if choice.Message.Role == "tool" &&
+				choice.Message.Content != "" {
+				toolResp := recall.ChatMessage{
+					SessionID: sessionID,
+					UserID:    userID,
+					Role:      "tool_response",
+					Content:   choice.Message.Content,
+				}
+				if err := l.recallStore.StoreMessage(toolResp); err != nil {
+					util.Logger.Debug(
+						"recall: store tool response failed",
+						slog.String("error", err.Error()))
+				}
+				if l.cortexStore != nil {
+					_ = l.cortexStore.StoreMessage(toolResp)
+				}
+			}
+		}
 	}
 
 	// [Fix 2] Record assistant response in MemoryFlow transcript.
 	if l.memoryFlow != nil && responseText != "" {
-		_ = l.memoryFlow.IngestTurn(
+		if err := l.memoryFlow.IngestTurn(
 			ctx, sessionID, userID, "assistant", responseText,
-		)
+		); err != nil {
+			util.Logger.Warn("memoryflow: ingest assistant turn failed",
+				slog.String("error", err.Error()))
+		}
 	}
 
 	// [Fix 3] Bridge MemoryFlow → tRPC Memory: promote extracted
@@ -646,15 +771,104 @@ func (l *CoreLoop) RunStream(
 					"reason", err.Error())
 				return
 			}
+			// Write promoted facts to the tRPC persistent memory
+			// store so they survive across sessions.
+			userKey := memory.UserKey{
+				AppName: "wukong-app",
+				UserID:  userID,
+			}
+			var stored int
 			for _, c := range candidates {
 				if c.Content == "" {
 					continue
 				}
+				if l.memoryService == nil {
+					util.Logger.Debug("memoryflow: promoted fact",
+						"kind", c.Kind,
+						"content", c.Content[:min(80, len(c.Content))],
+					)
+					continue
+				}
+				// Determine topics from the candidate's kind
+				// and collection.
+				topics := []string{
+					string(c.Kind),
+					c.Collection,
+				}
+				if err := l.memoryService.AddMemory(
+					bgCtx, userKey, c.Content, topics,
+				); err != nil {
+					util.Logger.Warn(
+						"memoryflow: store fact failed",
+						"kind", c.Kind,
+						"error", err.Error(),
+					)
+					continue
+				}
+				stored++
 				util.Logger.Debug("memoryflow: promoted fact",
 					"kind", c.Kind,
 					"content", c.Content[:min(80, len(c.Content))],
 				)
 			}
+			if stored > 0 {
+				util.Logger.Info("memoryflow: facts stored",
+					"stored", stored,
+					"total_candidates", len(candidates),
+				)
+			}
+		}()
+	}
+
+	// GraphFlow auto-extract: when enabled, extract entities and
+	// relationships from the conversation transcript and persist
+	// them into the knowledge graph after each turn.
+	if l.graphFlow != nil &&
+		l.cfg.GraphFlow.Enabled &&
+		l.cfg.GraphFlow.AutoExtract &&
+		responseText != "" {
+		l.bgWg.Add(1)
+		go func() {
+			defer l.bgWg.Done()
+			defer func() {
+				if r := recover(); r != nil {
+					util.Logger.Warn("graphflow: auto-extract panic",
+						"error", fmt.Sprint(r))
+				}
+			}()
+			bgCtx, cancel := context.WithTimeout(
+				context.Background(), 60*time.Second,
+			)
+			defer cancel()
+
+			// Build transcript from collected events.
+			var transcriptText strings.Builder
+			transcriptText.WriteString(
+				fmt.Sprintf("User: %s\n",
+					extractMessageContent(message)))
+			transcriptText.WriteString(
+				fmt.Sprintf("Assistant: %s\n", responseText))
+
+			result, err := l.graphFlow.ExtractFromTranscript(
+				bgCtx, sessionID, transcriptText.String())
+			if err != nil {
+				util.Logger.Debug("graphflow: extract failed",
+					slog.String("error", err.Error()))
+				return
+			}
+			if result == nil || len(result.Nodes) == 0 {
+				return
+			}
+			if err := l.graphFlow.BuildGraph(bgCtx, result); err != nil {
+				util.Logger.Warn("graphflow: build graph failed",
+					slog.String("error", err.Error()))
+				return
+			}
+			util.Logger.Info("graphflow: knowledge graph updated",
+				"nodes", len(result.Nodes),
+				"edges", len(result.Edges),
+				"session", sessionID[:min(8, len(sessionID))],
+			)
 		}()
 	}
 
@@ -1214,7 +1428,8 @@ func isCommandTool(toolName string) bool {
 	commandTools := []string{
 		"bash", "execute_command", "run_command",
 		"shell", "terminal", "command",
-		"command_execute", // developer extension tool
+		"command_execute",
+		"developer_command_execute", // developer extension (ToolSet prefix)
 	}
 	for _, t := range commandTools {
 		if strings.EqualFold(toolName, t) {
@@ -1306,4 +1521,39 @@ func createGuardrailRunner(
 	return runner.NewRunner(
 		"wukong-guardrail", reviewAgent,
 	), nil
+}
+
+// isMemoryDuplicated checks whether a memory content string is
+// already substantially present in the MemoryFlow wake-up context.
+// Uses a sliding window of kMinDupeLen characters to detect
+// substring matches of at least 60% overlap, which catches both
+// exact duplicates and near-duplicates (e.g., slightly reworded).
+const kMinDupeLen = 30
+
+func isMemoryDuplicated(memory, wakeCtx string) bool {
+	if len(memory) < kMinDupeLen || len(wakeCtx) < kMinDupeLen {
+		return false
+	}
+
+	// Build a set of kMinDupeLen-char windows from the memory.
+	windows := make(map[string]bool, len(memory)-kMinDupeLen+1)
+	for i := 0; i <= len(memory)-kMinDupeLen; i++ {
+		windows[memory[i:i+kMinDupeLen]] = true
+	}
+
+	// Count matching windows in the wake-up context.
+	var matches int
+	for i := 0; i <= len(wakeCtx)-kMinDupeLen; i++ {
+		if windows[wakeCtx[i:i+kMinDupeLen]] {
+			matches++
+		}
+	}
+
+	// If >= 60% of the memory's windows appear in the wake-up
+	// context, consider it a duplicate.
+	totalWindows := len(windows)
+	if totalWindows == 0 {
+		return false
+	}
+	return float64(matches)/float64(totalWindows) >= 0.6
 }

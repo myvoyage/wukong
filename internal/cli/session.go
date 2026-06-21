@@ -369,9 +369,9 @@ func bootstrapSession(
 		return nil, nil, nil, fmt.Errorf("create memory: %w", err)
 	}
 
-	// Clean memories older than 30 days on startup.
+	// Smart cleanup: evict low-importance memories when near capacity.
 	if wukongCfg.Memory.MaxMemories > 0 {
-		cleaned, _ := memoryMgr.CleanMemoriesByAge(
+		cleaned, _ := memoryMgr.SmartCleanup(
 			context.Background(),
 			tRPCMemory.UserKey{
 				AppName: "wukong-app",
@@ -380,7 +380,7 @@ func bootstrapSession(
 			30*24*time.Hour,
 		)
 		if cleaned > 0 {
-			util.Logger.Info("memory: startup cleanup",
+			util.Logger.Info("memory: startup smart cleanup",
 				"cleaned", cleaned)
 		}
 	}
@@ -478,6 +478,76 @@ func bootstrapSession(
 		}
 	}
 
+	// Create MemoryFlow service for conversation transcript,
+	// wake-up context, and fact promotion. When CortexStore is
+	// also enabled, share the same CortexDB instance to avoid
+	// opening conflicting connections to the same database file.
+	var memoryFlowSvc *cortex.MemoryFlowService
+	if wukongCfg.MemoryFlow.Enabled {
+		var planner memoryflow.QueryPlanner
+		var extractor memoryflow.SessionExtractor
+
+		// Resolve planner/extractor models: explicit config first,
+		// then fall back to global lightweight_model.
+		plannerModel := wukongCfg.MemoryFlow.PlannerModel
+		if plannerModel == "" {
+			plannerModel = wukongCfg.EffectiveLightweightModel()
+		}
+		extractorModel := wukongCfg.MemoryFlow.ExtractorModel
+		if extractorModel == "" {
+			extractorModel = wukongCfg.EffectiveLightweightModel()
+		}
+
+		if plannerModel != "" {
+			planner = cortex.NewLLMQueryPlanner(
+				factory, plannerModel,
+			)
+		}
+		if extractorModel != "" {
+			extractor = cortex.NewLLMSessionExtractor(
+				factory, extractorModel,
+			)
+		}
+
+		// Share the CortexDB instance when CortexStore is active.
+		if cortexStore != nil && cortexStore.DB() != nil {
+			mfs, err := cortex.NewMemoryFlowWithDB(
+				&wukongCfg.MemoryFlow, cortexStore.DB(),
+				planner, extractor)
+			if err != nil {
+				util.Logger.Warn("memoryflow init failed "+
+					"(shared db)",
+					slog.String("error", err.Error()))
+			} else {
+				memoryFlowSvc = mfs
+				util.Logger.Info("memoryflow: service initialized "+
+					"(shared cortexdb)",
+					"db_path", wukongCfg.MemoryFlow.DBPath,
+				)
+			}
+		} else {
+			mfs, err := cortex.NewMemoryFlow(
+				&wukongCfg.MemoryFlow, planner, extractor)
+			if err != nil {
+				util.Logger.Warn("memoryflow init failed",
+					slog.String("error", err.Error()))
+			} else {
+				memoryFlowSvc = mfs
+				util.Logger.Info("memoryflow: service initialized",
+					"db_path", wukongCfg.MemoryFlow.DBPath,
+				)
+				// When MemoryFlow created its own CortexDB,
+				// share it back to CortexStore if it was
+				// lexical-only (no embedder).
+				if cortexStore != nil && cortexStore.DB() == nil {
+					cortexStore.SetDB(memoryFlowSvc.DB())
+					util.Logger.Info("cortex: shared cortexdb " +
+						"from memoryflow")
+				}
+			}
+		}
+	}
+
 	// Create recall manager for tools.
 	// When cortex is enabled, recall tools use vector-enhanced search.
 	var recallMgr *recall.RecallManager
@@ -485,51 +555,47 @@ func bootstrapSession(
 	if cortexStore != nil && recallStore != nil {
 		// Use CortexDB vector search for recall tools.
 		cortexRecallMgr = cortex.NewRecallManager(cortexStore)
+		// Wire tRPC memory reader so recall_search results
+		// include persistent memories alongside conversation
+		// history.
+		cortexRecallMgr.SetMemoryReader(
+			func(ctx context.Context, query string) ([]string, error) {
+				userKey := tRPCMemory.UserKey{
+					AppName: "wukong-app",
+					UserID:  userID,
+				}
+				entries, err := memoryMgr.Service().SearchMemories(
+					ctx, userKey, query)
+				if err != nil {
+					return nil, err
+				}
+				texts := make([]string, 0, len(entries))
+				for _, e := range entries {
+					if e.Memory != nil && e.Memory.Memory != "" {
+						texts = append(texts, e.Memory.Memory)
+					}
+				}
+				return texts, nil
+			},
+		)
+		util.Logger.Info("recall_search: cross-searching " +
+			"tRPC persistent memories")
 	} else if recallStore != nil {
 		recallMgr = recall.NewRecallManager(recallStore)
 	}
 
-	// Create MemoryFlow service for conversation transcript,
-	// wake-up context, and fact promotion.
-	var memoryFlowSvc *cortex.MemoryFlowService
-	if wukongCfg.MemoryFlow.Enabled {
-		var planner memoryflow.QueryPlanner
-		var extractor memoryflow.SessionExtractor
-
-		// Use LLM-driven planning/extraction when a model is configured.
-		// Otherwise, deterministic heuristics are used.
-		if wukongCfg.MemoryFlow.PlannerModel != "" {
-			planner = cortex.NewLLMQueryPlanner(
-				factory, wukongCfg.MemoryFlow.PlannerModel,
-			)
-		}
-		if wukongCfg.MemoryFlow.ExtractorModel != "" {
-			extractor = cortex.NewLLMSessionExtractor(
-				factory, wukongCfg.MemoryFlow.ExtractorModel,
-			)
-		}
-
-		mfs, err := cortex.NewMemoryFlow(
-			&wukongCfg.MemoryFlow, planner, extractor)
-		if err != nil {
-			util.Logger.Warn("memoryflow init failed",
-				slog.String("error", err.Error()))
-		} else {
-			memoryFlowSvc = mfs
-			util.Logger.Info("memoryflow: service initialized",
-				"db_path", wukongCfg.MemoryFlow.DBPath,
-			)
-		}
-	}
-
 	// Create GraphFlow service for knowledge graph construction.
 	var kgToolMgr *cortex.KGToolManager
+	var graphFlowSvc *cortex.GraphFlowService
 	if wukongCfg.GraphFlow.Enabled {
+		extractorModel := wukongCfg.GraphFlow.ExtractorModel
+		if extractorModel == "" {
+			extractorModel = wukongCfg.EffectiveLightweightModel()
+		}
 		var jsonGen graphflow.JSONGenerator
-		if wukongCfg.GraphFlow.ExtractorModel != "" {
+		if extractorModel != "" {
 			jsonGen = cortex.NewLLMJSONGenerator(
-				factory,
-				wukongCfg.GraphFlow.ExtractorModel,
+				factory, extractorModel,
 			)
 		}
 		gfs, err := cortex.NewGraphFlow(
@@ -539,9 +605,14 @@ func bootstrapSession(
 				slog.String("error", err.Error()))
 		} else {
 			kgToolMgr = cortex.NewKGToolManager(gfs)
+			graphFlowSvc = gfs
 			util.Logger.Info("graphflow: service initialized",
 				"db_path", wukongCfg.GraphFlow.DBPath,
 			)
+			if wukongCfg.GraphFlow.AutoExtract {
+				util.Logger.Info("graphflow: auto-extract enabled — " +
+					"entities will be extracted after each turn")
+			}
 		}
 	}
 
@@ -863,8 +934,10 @@ func bootstrapSession(
 		FunctionTools:      functionTools,
 		SecurityGuard:      guard,
 		RecallStore:        recallStore,
+		CortexStore:        cortexStore,
 		RevisionModel:      revisionModel,
 		MemoryFlowService:  memoryFlowSvc,
+		GraphFlowService:   graphFlowSvc,
 		TopOfMindInstructions: topOfMindInstructions,
 		TelemetryShutdown:  combinedShutdown,
 		MemoryClose:        memoryMgr.Close,
@@ -1021,30 +1094,29 @@ func createExtractorModel(
 	memCfg *config.MemoryConfig,
 	wukongCfg *config.WukongConfig,
 ) (model.Model, error) {
-	if memCfg.ExtractorProvider != "" {
-		// Use the dedicated extractor provider
-		extractorProvider := wukongCfg.FindProvider(
-			memCfg.ExtractorProvider,
-		)
-		if extractorProvider == nil {
-			return nil, fmt.Errorf(
-				"extractor_provider %q not found in providers list",
-				memCfg.ExtractorProvider,
-			)
-		}
-		// If extractor_model is also set, temporarily override
-		// the provider's default model for extraction.
-		if memCfg.ExtractorModel != "" {
-			originalModel := extractorProvider.Model
-			extractorProvider.Model = memCfg.ExtractorModel
-			defer func() {
-				extractorProvider.Model = originalModel
-			}()
-		}
-		return factory.CreateModel(memCfg.ExtractorProvider)
+	extractorProviderName := memCfg.ExtractorProvider
+	if extractorProviderName == "" {
+		extractorProviderName = wukongCfg.EffectiveLightweightProvider()
 	}
-	// Fall back to default provider
-	return factory.CreateDefaultModel()
+	extractorModelName := memCfg.ExtractorModel
+	if extractorModelName == "" {
+		extractorModelName = wukongCfg.EffectiveLightweightModel()
+	}
+
+	extractorProvider := wukongCfg.FindProvider(extractorProviderName)
+	if extractorProvider == nil {
+		return nil, fmt.Errorf(
+			"extractor provider %q not found in providers list",
+			extractorProviderName,
+		)
+	}
+	// Temporarily override the provider's model for extraction.
+	originalModel := extractorProvider.Model
+	extractorProvider.Model = extractorModelName
+	defer func() {
+		extractorProvider.Model = originalModel
+	}()
+	return factory.CreateModel(extractorProviderName)
 }
 
 // applyOverrides applies command-line overrides to config.

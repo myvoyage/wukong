@@ -6,6 +6,9 @@ package cortex
 
 import (
 	"context"
+	"encoding/json"
+	"strconv"
+	"strings"
 
 	"trpc.group/trpc-go/trpc-agent-go/tool"
 	"trpc.group/trpc-go/trpc-agent-go/tool/function"
@@ -112,8 +115,47 @@ func (m *KGToolManager) analyzeGraph(
 		}, nil
 	}
 
+	// Parse SPARQL JSON result to extract entity/edge counts.
+	entityCount, predicateCount := parseSPARQLCounts(result)
+
 	return KGAnalyzeRsp{
-		Success: true,
-		Summary: result,
+		Success:     true,
+		Summary:     result,
+		EntityCount: entityCount,
+		EdgeCount:   predicateCount,
 	}, nil
+}
+
+// parseSPARQLCounts extracts entity and predicate counts from
+// a SPARQL SELECT query result. The result is expected to be a
+// JSON object with bindings for ?entities, ?predicates, ?triples.
+// Falls back to 0 counts on parse failure.
+func parseSPARQLCounts(raw string) (entities int, edges int) {
+	// Try JSON parsing first (standard SPARQL JSON result format).
+	var result struct {
+		Results struct {
+			Bindings []map[string]struct {
+				Value string `json:"value"`
+			} `json:"bindings"`
+		} `json:"results"`
+	}
+	// Extract JSON if embedded in text.
+	jsonStr := extractJSON(raw)
+	if jsonStr == "" {
+		return 0, 0
+	}
+	if err := json.Unmarshal([]byte(jsonStr), &result); err != nil {
+		return 0, 0
+	}
+	if len(result.Results.Bindings) == 0 {
+		return 0, 0
+	}
+	bindings := result.Results.Bindings[0]
+	if v, ok := bindings["entities"]; ok {
+		entities, _ = strconv.Atoi(strings.Split(v.Value, ".")[0])
+	}
+	if v, ok := bindings["predicates"]; ok {
+		edges, _ = strconv.Atoi(strings.Split(v.Value, ".")[0])
+	}
+	return entities, edges
 }

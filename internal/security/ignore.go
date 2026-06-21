@@ -9,7 +9,6 @@
 package security
 
 import (
-	"bufio"
 	"os"
 	"path/filepath"
 	"strings"
@@ -39,20 +38,19 @@ func NewIgnoreMatcher(ignoreFile string, enabled bool) *IgnoreMatcher {
 
 	paths := resolveIgnorePaths(ignoreFile)
 	for _, p := range paths {
-		f, err := os.Open(p)
+		content, err := os.ReadFile(p)
 		if err != nil {
 			continue
 		}
-		defer f.Close()
 
 		m := &IgnoreMatcher{
 			enabled:    true,
 			sourceDir: filepath.Dir(p),
 		}
 
-		scanner := bufio.NewScanner(f)
-		for scanner.Scan() {
-			line := strings.TrimSpace(scanner.Text())
+		lines := strings.Split(string(content), "\n")
+		for _, line := range lines {
+			line = strings.TrimSpace(line)
 			if line == "" || strings.HasPrefix(line, "#") {
 				continue
 			}
@@ -197,6 +195,10 @@ func IsFileAccessTool(toolName string) bool {
 		"file_write", "file_write_text",
 		"file_replace", "replace_in_file",
 		"delete_file", "delete_files",
+		// ToolSet prefixed variants (tRPC framework naming).
+		"developer_file_read",
+		"developer_file_write",
+		"developer_file_replace",
 	}
 	for _, t := range fileTools {
 		if strings.EqualFold(toolName, t) {

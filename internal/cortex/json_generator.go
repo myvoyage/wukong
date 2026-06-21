@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/km269/wukong/internal/provider"
+	"github.com/km269/wukong/internal/util"
 
 	"trpc.group/trpc-go/trpc-agent-go/model"
 )
@@ -54,8 +55,8 @@ func (g *LLMJSONGenerator) GenerateJSON(
 			model.NewUserMessage(userPrompt),
 		},
 		GenerationConfig: model.GenerationConfig{
-			Temperature: ptrFloat64(0.1),
-			MaxTokens:   ptrInt(2048),
+			Temperature: util.Float64Ptr(0.1),
+			MaxTokens:   util.IntPtr(2048),
 		},
 	}
 
@@ -97,6 +98,3 @@ func emptyResult() []byte {
 	})
 	return data
 }
-
-func ptrFloat64(v float64) *float64 { return &v }
-func ptrInt(v int) *int             { return &v }

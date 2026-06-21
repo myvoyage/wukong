@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	_ "github.com/mattn/go-sqlite3"
+	_ "modernc.org/sqlite"
 
 	"github.com/km269/wukong/internal/config"
 	"github.com/km269/wukong/internal/util"
@@ -183,18 +183,35 @@ func (s *Store) Search(
 }
 
 // searchLike is the fallback LIKE-based search when FTS5 is unavailable.
+// When userID is empty, searches across all users; otherwise filters
+// by the specified user. This mirrors the FTS5 path behavior.
 func (s *Store) searchLike(
 	query, userID string, limit int,
 ) ([]SearchResult, error) {
 	searchTerm := "%" + strings.ToLower(query) + "%"
-	rows, err := s.db.Query(
-		`SELECT id, session_id, user_id, role, content, created_at
-		 FROM chat_recall
-		 WHERE user_id = ? AND LOWER(content) LIKE ?
-		 ORDER BY created_at DESC
-		 LIMIT ?`,
-		userID, searchTerm, limit,
+	var (
+		rows *sql.Rows
+		err  error
 	)
+	if userID != "" {
+		rows, err = s.db.Query(
+			`SELECT id, session_id, user_id, role, content, created_at
+			 FROM chat_recall
+			 WHERE user_id = ? AND LOWER(content) LIKE ?
+			 ORDER BY created_at DESC
+			 LIMIT ?`,
+			userID, searchTerm, limit,
+		)
+	} else {
+		rows, err = s.db.Query(
+			`SELECT id, session_id, user_id, role, content, created_at
+			 FROM chat_recall
+			 WHERE LOWER(content) LIKE ?
+			 ORDER BY created_at DESC
+			 LIMIT ?`,
+			searchTerm, limit,
+		)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("search: %w", err)
 	}

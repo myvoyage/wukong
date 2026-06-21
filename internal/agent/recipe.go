@@ -84,8 +84,6 @@ const (
 type RecipeToolSet struct {
 	tools     []tool.Tool
 	subAgents []agent.Agent
-	inited    bool
-	closed    bool
 }
 
 // NewRecipeToolSet scans the configured recipe directory for .yaml files,
@@ -111,7 +109,8 @@ func NewRecipeToolSet(
 	if len(dir) >= 2 && dir[:2] == "~/" {
 		home, err := os.UserHomeDir()
 		if err != nil {
-			util.Logger.Warn("recipe: cannot resolve home dir")
+			util.Logger.Warn("recipe: cannot resolve home dir",
+				slog.String("error", err.Error()))
 			return nil
 		}
 		dir = filepath.Join(home, dir[2:])
@@ -120,9 +119,9 @@ func NewRecipeToolSet(
 
 	// Try finding the dir relative to cwd if absolute doesn't exist.
 	if _, err := os.Stat(dir); os.IsNotExist(err) {
-		if wd, err := os.Getwd(); err == nil {
+		if wd, wdErr := os.Getwd(); wdErr == nil {
 			alt := filepath.Join(wd, ".wukong", "recipes")
-			if _, err := os.Stat(alt); err == nil {
+			if _, statErr := os.Stat(alt); statErr == nil {
 				dir = alt
 			}
 		}
@@ -225,13 +224,11 @@ func (ts *RecipeToolSet) Name() string {
 
 // Init initializes the tool set.
 func (ts *RecipeToolSet) Init(_ context.Context) error {
-	ts.inited = true
 	return nil
 }
 
 // Close releases resources.
 func (ts *RecipeToolSet) Close() error {
-	ts.closed = true
 	return nil
 }
 

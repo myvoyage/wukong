@@ -10,7 +10,6 @@ require (
 	github.com/dop251/goja v0.0.0-20260607120635-348e6bea910d
 	github.com/google/uuid v1.6.0
 	github.com/liliang-cn/cortexdb/v2 v2.25.0
-	github.com/mattn/go-sqlite3 v1.14.32
 	github.com/redis/go-redis/v9 v9.12.1
 	github.com/spf13/cobra v1.9.1
 	github.com/spf13/viper v1.20.1
@@ -21,6 +20,7 @@ require (
 	go.opentelemetry.io/otel/trace v1.43.0
 	golang.org/x/sys v0.46.0
 	gopkg.in/yaml.v3 v3.0.1
+	modernc.org/sqlite v1.38.2
 	trpc.group/trpc-go/trpc-agent-go v1.10.0
 	trpc.group/trpc-go/trpc-agent-go/memory/sqlite v1.10.0
 	trpc.group/trpc-go/trpc-agent-go/session/sqlite v1.10.0
@@ -133,6 +133,5 @@ require (
 	modernc.org/libc v1.66.3 // indirect
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.11.0 // indirect
-	modernc.org/sqlite v1.38.2 // indirect
 	trpc.group/trpc-go/trpc-a2a-go v0.2.5 // indirect
 )

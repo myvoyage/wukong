@@ -146,16 +146,21 @@ func GetDefaultGenerationConfig(
 }
 
 // CreateRevisionModel creates a summarization model for context revision.
-// Uses the revision provider if configured, otherwise falls back to the
-// default provider.
+// Resolution order:
+//  1. revision.revision_provider / revision.revision_model (explicit)
+//  2. lightweight_provider / lightweight_model (global)
+//  3. default_provider / its model
 func (f *Factory) CreateRevisionModel() (RevisionModel, error) {
 	providerName := f.cfg.Revision.RevisionProvider
 	modelName := f.cfg.Revision.RevisionModel
 
-	// If no revision provider specified, use the default provider
 	if providerName == "" {
-		providerName = f.cfg.DefaultProvider
+		providerName = f.cfg.EffectiveLightweightProvider()
 	}
+	if modelName == "" {
+		modelName = f.cfg.EffectiveLightweightModel()
+	}
+	// Final fallback: if still empty, use default provider's model.
 	if modelName == "" {
 		p := f.cfg.FindProvider(providerName)
 		if p != nil {

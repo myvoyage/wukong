@@ -56,6 +56,17 @@ type WukongConfig struct {
 	// "warn", "error". Overridden by --debug/--quiet CLI flags.
 	// Default: "info".
 	LogLevel string `mapstructure:"log_level"`
+	// LightweightProvider is the optional provider name for
+	// background tasks (memory extraction, summarisation,
+	// knowledge graph construction). Falls back to
+	// DefaultProvider when empty.
+	LightweightProvider string `mapstructure:"lightweight_provider"`
+	// LightweightModel is the optional lightweight model for
+	// background tasks. When set, it becomes the default model
+	// for memory.extractor_model, memoryflow.*, graphflow.*,
+	// and revision.revision_model if they are not explicitly
+	// configured.
+	LightweightModel string `mapstructure:"lightweight_model"`
 
 	// Providers lists all available LLM backend configurations.
 	Providers []ProviderConfig `mapstructure:"providers"`
@@ -1226,6 +1237,28 @@ func (c *WukongConfig) FindProvider(name string) *ProviderConfig {
 // Returns nil if the default provider is not found.
 func (c *WukongConfig) DefaultProviderConfig() *ProviderConfig {
 	return c.FindProvider(c.DefaultProvider)
+}
+
+// EffectiveLightweightModel returns the effective lightweight model name.
+// Falls back from LightweightModel to the default provider's model.
+func (c *WukongConfig) EffectiveLightweightModel() string {
+	if c.LightweightModel != "" {
+		return c.LightweightModel
+	}
+	p := c.DefaultProviderConfig()
+	if p != nil {
+		return p.Model
+	}
+	return ""
+}
+
+// EffectiveLightweightProvider returns the effective lightweight provider name.
+// Falls back from LightweightProvider to DefaultProvider.
+func (c *WukongConfig) EffectiveLightweightProvider() string {
+	if c.LightweightProvider != "" {
+		return c.LightweightProvider
+	}
+	return c.DefaultProvider
 }
 
 // EnabledExtensions returns only the extensions that are enabled.

@@ -74,6 +74,8 @@ func (e *todoEnforcer) afterAgent(
 	// Parse the todo list from session state.
 	var todos []map[string]any
 	if err := json.Unmarshal(todoBytes, &todos); err != nil {
+		slog.Warn("todoenforcer: unmarshal todos failed",
+			"error", err.Error())
 		return nil, nil
 	}
 

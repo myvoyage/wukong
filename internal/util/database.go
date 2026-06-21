@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"sync"
 
-	_ "github.com/mattn/go-sqlite3"
+	_ "modernc.org/sqlite"
 )
 
 // DatabasePool provides a shared SQLite connection pool that multiple
@@ -40,7 +40,7 @@ func (p *DatabasePool) GetDB() (*sql.DB, error) {
 		return p.db, nil
 	}
 
-	db, err := sql.Open("sqlite3", p.path+
+	db, err := sql.Open("sqlite", p.path+
 		"?_journal_mode=WAL&_synchronous=NORMAL&_foreign_keys=ON"+
 		"&_busy_timeout=5000")
 	if err != nil {

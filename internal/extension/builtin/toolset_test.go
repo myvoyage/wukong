@@ -14,12 +14,12 @@ func TestDeveloperToolSet_Tools(t *testing.T) {
 	tools := ts.Tools(ctx)
 
 	expectedTools := []string{
-		"file_read",
-		"file_write",
-		"file_replace",
-		"command_execute",
-		"code_search",
-		"directory_list",
+		"developer_file_read",
+		"developer_file_write",
+		"developer_file_replace",
+		"developer_command_execute",
+		"developer_code_search",
+		"developer_directory_list",
 	}
 
 	if len(tools) != len(expectedTools) {

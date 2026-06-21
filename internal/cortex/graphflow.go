@@ -98,9 +98,6 @@ func (g *GraphFlowService) BuildGraph(
 		return nil
 	}
 
-	graph := g.db.Graph()
-	_ = graph
-
 	// Convert extraction nodes to entity inputs.
 	entities := make(
 		[]cortexdb.ToolEntityInput, 0, len(result.Nodes))
@@ -128,20 +125,48 @@ func (g *GraphFlowService) BuildGraph(
 		relations = append(relations, rel)
 	}
 
-	// Persist entities and relations via GraphRAG tools.
+	// Persist entities via GraphRAG tools.
 	if len(entities) > 0 {
 		toolbox := g.db.GraphRAGTools()
-		payload, _ := json.Marshal(
+		payload, err := json.Marshal(
 			cortexdb.ToolUpsertEntitiesRequest{
 				Entities:   entities,
 				DocumentID: result.SourceID,
 			},
 		)
-		_, _ = toolbox.Call(ctx, "ingest_document", payload)
+		if err != nil {
+			return fmt.Errorf(
+				"graphflow: marshal entities: %w", err)
+		}
+		if _, err := toolbox.Call(
+			ctx, "ingest_document", payload,
+		); err != nil {
+			return fmt.Errorf(
+				"graphflow: persist entities: %w", err)
+		}
 	}
 
-	_ = relations
-	_ = ctx
+	// Persist relations via GraphRAG tools.
+	if len(relations) > 0 {
+		toolbox := g.db.GraphRAGTools()
+		payload, err := json.Marshal(
+			cortexdb.ToolUpsertRelationsRequest{
+				Relations:  relations,
+				DocumentID: result.SourceID,
+			},
+		)
+		if err != nil {
+			return fmt.Errorf(
+				"graphflow: marshal relations: %w", err)
+		}
+		if _, err := toolbox.Call(
+			ctx, "upsert_relations", payload,
+		); err != nil {
+			return fmt.Errorf(
+				"graphflow: persist relations: %w", err)
+		}
+	}
+
 	return nil
 }
 
@@ -169,8 +194,8 @@ func (g *GraphFlowService) QueryKnowledge(
 }
 
 // BuildContext assembles KG-enhanced context for injection into
-// the agent's system prompt. It queries the graph for relevant
-// entities based on the provided keywords.
+// the agent's system prompt. It queries the graph for entities
+// matching the provided keywords using a FILTER clause.
 func (g *GraphFlowService) BuildContext(
 	ctx context.Context,
 	keywords []string,
@@ -179,20 +204,23 @@ func (g *GraphFlowService) BuildContext(
 		return "", nil
 	}
 
-	// Build safe keyword filter values.
-	filters := make([]string, 0, len(keywords))
+	// Build type filter values for SPARQL.
+	var filterClauses []string
 	for _, kw := range keywords {
 		kw = strings.ToLower(sanitizeIRI(kw))
-		filters = append(filters, fmt.Sprintf(`"%s"`, kw))
+		filterClauses = append(filterClauses,
+			fmt.Sprintf(`CONTAINS(LCASE(STR(?object)), "%s")`, kw))
 	}
 
+	// Build SPARQL query with keyword filtering.
 	sparql := fmt.Sprintf(`
 		PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
-		SELECT ?subject ?predicate ?object WHERE {
+		SELECT DISTINCT ?subject ?predicate ?object WHERE {
 			?subject ?predicate ?object .
+			FILTER(%s)
 		}
 		LIMIT 20
-	`)
+	`, strings.Join(filterClauses, " || "))
 
 	result, err := g.QueryKnowledge(ctx, sparql)
 	if err != nil {

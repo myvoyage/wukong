@@ -15,6 +15,17 @@
 log_level: "info"
 
 # ---------------------------------------------------------------------------
+# Global Lightweight Model - 后台任务共享的轻量模型
+# 当各子系统未显式指定模型时，统一使用此配置:
+#   - memory.extractor_model (记忆提取)
+#   - memoryflow.planner_model / extractor_model (检索规划/转录提取)
+#   - graphflow.extractor_model (知识图谱构建)
+#   - revision.revision_model (上下文压缩)
+# ---------------------------------------------------------------------------
+lightweight_provider: "lmstudio"
+lightweight_model: "gemma-4-e4b-it"
+
+# ---------------------------------------------------------------------------
 # Default Provider - 默认使用的 AI 提供商
 # 必须与下方 providers 列表中某个 name 匹配
 # ---------------------------------------------------------------------------
@@ -173,7 +184,7 @@ memory:
   auto_extract: true
   extract_timeout: "600s"
   extractor_provider: "lmstudio"          # 独立提取模型 provider
-  extractor_model: "gemma-4-e4b-it"       # 用轻量模型做提取（失败时自动回退默认模型）
+  # extractor_model: ""                   # 未指定 → 使用全局 lightweight_model
   extractor_prompt: |
     You are a Memory Manager. Extract concise memories from the conversation.
     Today's date is {current_date}. Resolve ALL relative time references to absolute dates.
@@ -261,9 +272,9 @@ memoryflow:
   embedding_dimensions: 0               # 向量维度 (0=自动检测)
 
   # 可选：指定用于规划和提取的 LLM 模型
-  # 留空则使用确定性启发式算法
-  planner_model: "gemma-4-e4b-it"
-  extractor_model: "gemma-4-e4b-it"
+  # 留空则使用全局 lightweight_model
+  # planner_model: ""
+  # extractor_model: ""
 
 # ---------------------------------------------------------------------------
 # GraphFlow - CortexDB 知识图谱构建配置
@@ -277,10 +288,10 @@ graphflow:
 
   # 自动提取：每轮对话后自动提取实体/关系
   # 需要 MemoryFlow 同时启用
-  auto_extract: false
+  auto_extract: true
 
-  # LLM 提取模型（留空使用启发式提取）
-  extractor_model: "gemma-4-e4b-it"
+  # LLM 提取模型（留空使用全局 lightweight_model）
+  # extractor_model: ""
 
 # ---------------------------------------------------------------------------
 # ImportFlow - CortexDB 结构化数据导入配置
@@ -300,9 +311,9 @@ revision:
   # 辅助摘要模型：用于智能上下文压缩。
   # 指定一个廉价/快速的模型（如 gpt-4o-mini、deepseek-chat），
   # 专门负责对旧对话生成结构化摘要，避免主模型 token 浪费。
-  # 留空则使用默认 provider/model。
+  # 留空则使用全局 lightweight_model。
   revision_provider: "lmstudio"
-  revision_model: "gemma-4-e4b-it"
+  # revision_model: ""
 
   # 启用 LLM 智能摘要（需要 revision_model 配置正确）。
   # 开启后 FilterIrrelevant 将调用辅助模型生成上下文摘要，
@@ -425,7 +436,7 @@ knowledge:
   enabled: false
   # Embedding 模型配置 (用于文本向量化)
   embedder_provider: "lmstudio"             # Embedding provider 名称
-  embedder_model: "qwen3-embedding-0.6b-graphql"   # 1536 维向量
+  embedder_model: "qwen3-embedding-4b"   # 1536 维向量
   # 文档源 (支持 txt, md, pdf, csv, json, docx)
   # sources:
   #   - "./docs"

@@ -70,41 +70,27 @@ func (b *TeamBuilder) BuildCoordinatorTeam(
 			"team_coordinator mode requires at least one team member")
 	}
 
-	coordinator := llmagent.New("team-coordinator",
+	coordinatorOpts := []llmagent.Option{
 		llmagent.WithModel(b.model),
 		llmagent.WithGenerationConfig(b.genConfig),
-		llmagent.WithDescription("Team coordinator that delegates "+
+		llmagent.WithDescription("Team coordinator that delegates " +
 			"to specialized members and synthesizes their results"),
 		llmagent.WithInstruction(
-			"You are a team coordinator. Your job is to understand "+
-				"the user's request, delegate subtasks to the most "+
-				"appropriate team members, and synthesize their "+
-				"results into a coherent final answer. "+
-				"Call multiple members in parallel when their tasks "+
-				"are independent. Always produce a final consolidated "+
+			"You are a team coordinator. Your job is to understand " +
+				"the user's request, delegate subtasks to the most " +
+				"appropriate team members, and synthesize their " +
+				"results into a coherent final answer. " +
+				"Call multiple members in parallel when their tasks " +
+				"are independent. Always produce a final consolidated " +
 				"response for the user."),
 		llmagent.WithEnableParallelTools(true),
-	)
+	}
 	if b.cfg.Agent.ContextCompaction {
-		coordinatorOpts := []llmagent.Option{
-			llmagent.WithEnableContextCompaction(true),
-		}
-		coordinator = llmagent.New("team-coordinator", coordinatorOpts...)
-		// Re-apply model and tools since WithEnableParallelTools
-		// was on the original instance. For simplicity, create
-		// with all options at once:
-		coordinator = llmagent.New("team-coordinator",
-			llmagent.WithModel(b.model),
-			llmagent.WithGenerationConfig(b.genConfig),
-			llmagent.WithDescription("Team coordinator"),
-			llmagent.WithInstruction(
-				"You are a team coordinator. Delegate subtasks "+
-					"to team members and synthesize results. "+
-					"Call members in parallel when possible."),
-			llmagent.WithEnableParallelTools(true),
+		coordinatorOpts = append(coordinatorOpts,
 			llmagent.WithEnableContextCompaction(true),
 		)
 	}
+	coordinator := llmagent.New("team-coordinator", coordinatorOpts...)
 
 	tm, err := team.New(coordinator, members)
 	if err != nil {

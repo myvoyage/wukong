@@ -162,6 +162,11 @@ func (m *ImportToolManager) planFromDDLAI(
 	opts := importflow.DDLMappingOptions{
 		RelationStyle: req.RelationStyle,
 	}
+	// TODO: Pass jsonGen (graphflow.JSONGenerator) here to enable
+	// LLM-driven DDL-to-entity mapping. Currently nil means the
+	// AI-enhanced path always falls back to deterministic mapping.
+	// Wire in the LLM generator from the global lightweight_model
+	// configuration when GraphFlow is enabled.
 	plan, tables, llmUsed, err :=
 		m.importFlow.MappingFromDDLWithLLM(
 			ctx, req.DDL, nil, opts)

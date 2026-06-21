@@ -130,9 +130,13 @@ func NewComputerControllerToolSet(
 }
 
 // Tools returns the computer controller tools.
+// Returns nil if the toolset has not been initialised or has been closed.
 func (ts *ComputerControllerToolSet) Tools(
-	ctx context.Context,
+	_ context.Context,
 ) []tool.Tool {
+	if !ts.inited || ts.closed {
+		return nil
+	}
 	return ts.tools
 }
 
@@ -154,9 +158,12 @@ func (ts *ComputerControllerToolSet) Init(ctx context.Context) error {
 	return nil
 }
 
-// Close releases resources.
+// Close releases resources including the browser controller.
 func (ts *ComputerControllerToolSet) Close() error {
 	ts.closed = true
+	if ts.browser != nil {
+		return ts.browser.Close()
+	}
 	return nil
 }
 

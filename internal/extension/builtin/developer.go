@@ -31,7 +31,7 @@ func NewDeveloperToolSet() *DeveloperToolSet {
 	ts.tools = []tool.Tool{
 		function.NewFunctionTool(
 			ts.readFile,
-			function.WithName("file_read"),
+			function.WithName("developer_file_read"),
 			function.WithDescription(
 				"Read contents of a file at the given path. "+
 					"Returns file content as text.",
@@ -39,7 +39,7 @@ func NewDeveloperToolSet() *DeveloperToolSet {
 		),
 		function.NewFunctionTool(
 			ts.writeFile,
-			function.WithName("file_write"),
+			function.WithName("developer_file_write"),
 			function.WithDescription(
 				"Write content to a file at the given path. "+
 					"Creates the file if it doesn't exist, "+
@@ -48,7 +48,7 @@ func NewDeveloperToolSet() *DeveloperToolSet {
 		),
 		function.NewFunctionTool(
 			ts.replaceInFile,
-			function.WithName("file_replace"),
+			function.WithName("developer_file_replace"),
 			function.WithDescription(
 				"Find and replace text in a file. Uses exact "+
 					"string matching. Prefer this over file_write "+
@@ -57,7 +57,7 @@ func NewDeveloperToolSet() *DeveloperToolSet {
 		),
 		function.NewFunctionTool(
 			ts.executeCommand,
-			function.WithName("command_execute"),
+			function.WithName("developer_command_execute"),
 			function.WithDescription(
 				"Execute a shell command and return its output. "+
 					"Use this to run build tools, tests, git commands, etc. "+
@@ -66,7 +66,7 @@ func NewDeveloperToolSet() *DeveloperToolSet {
 		),
 		function.NewFunctionTool(
 			ts.searchCode,
-			function.WithName("code_search"),
+			function.WithName("developer_code_search"),
 			function.WithDescription(
 				"Search for code patterns in the project "+
 					"directory using ripgrep. Automatically "+
@@ -75,7 +75,7 @@ func NewDeveloperToolSet() *DeveloperToolSet {
 		),
 		function.NewFunctionTool(
 			ts.listDirectory,
-			function.WithName("directory_list"),
+			function.WithName("developer_directory_list"),
 			function.WithDescription(
 				"List files and directories at the given path.",
 			),

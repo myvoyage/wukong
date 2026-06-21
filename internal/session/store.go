@@ -6,7 +6,7 @@ package session
 import (
 	"fmt"
 
-	_ "github.com/mattn/go-sqlite3"
+	_ "modernc.org/sqlite"
 
 	"github.com/km269/wukong/internal/config"
 	"github.com/km269/wukong/internal/util"

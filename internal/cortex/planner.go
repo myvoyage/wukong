@@ -8,11 +8,14 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/km269/wukong/internal/provider"
+	"github.com/km269/wukong/internal/util"
 
 	cortexdb "github.com/liliang-cn/cortexdb/v2/pkg/cortexdb"
 	"github.com/liliang-cn/cortexdb/v2/pkg/memoryflow"
+	"trpc.group/trpc-go/trpc-agent-go/model"
 )
 
 // Retrieval mode string constants used by CortexDB's RetrievalPlan.
@@ -56,31 +59,105 @@ func (p *LLMQueryPlanner) Plan(
 		return p.heuristicPlan(query), nil
 	}
 
-	// Build the planning prompt.
-	prompt := fmt.Sprintf(
-		"You are a retrieval strategy planner. "+
-			"Given a user query and session context, "+
-			"decide the best search mode.\n\n"+
-			"Session: %s\n"+
-			"User: %s\n"+
-			"Query: %s\n\n"+
-			"Respond with exactly one word: "+
-			"vector, lexical, or hybrid.",
-		state.SessionID, state.UserID, query,
-	)
-
 	// Attempt LLM-based planning.
-	_, err := p.factory.CreateModel(p.modelName)
-	if err != nil {
-		return p.heuristicPlan(query), nil
+	plan, llmErr := p.llmPlan(ctx, query, state)
+	if llmErr == nil {
+		return plan, nil
 	}
 
-	// In production, call the LLM and parse the response.
-	// For now, use heuristic as a reliable default.
-	_ = ctx
-	_ = prompt
-
+	// Fall back to heuristic on any failure.
 	return p.heuristicPlan(query), nil
+}
+
+// llmPlan calls the LLM to decide the best retrieval strategy.
+// Uses a compact prompt with max_tokens=8 to minimise token cost.
+func (p *LLMQueryPlanner) llmPlan(
+	ctx context.Context,
+	query string,
+	state memoryflow.SessionState,
+) (*cortexdb.RetrievalPlan, error) {
+	mdl, err := p.factory.CreateModel(p.modelName)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"planner: create model: %w", err)
+	}
+	if mdl == nil {
+		return nil, fmt.Errorf("planner: model is nil")
+	}
+
+	prompt := fmt.Sprintf(
+		"You are a retrieval strategy planner. "+
+			"Given a user query, decide the best search mode.\n\n"+
+			"Query: %s\n\n"+
+			"Modes:\n"+
+			"- lexical: for exact keyword/entity searches\n"+
+			"- vector: for conceptual or abstract queries\n"+
+			"- hybrid: for long, complex queries\n\n"+
+			"Respond with exactly one word: "+
+			"lexical, vector, or hybrid.",
+		query,
+	)
+
+	planCtx, cancel := context.WithTimeout(
+		ctx, 15*time.Second,
+	)
+	defer cancel()
+
+	req := &model.Request{
+		Messages: []model.Message{
+			model.NewUserMessage(prompt),
+		},
+		GenerationConfig: model.GenerationConfig{
+			MaxTokens:   util.IntPtr(8),
+			Temperature: util.Float64Ptr(0.0),
+			Stream:      false,
+		},
+	}
+
+	respChan, err := mdl.GenerateContent(planCtx, req)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"planner: generate: %w", err)
+	}
+
+	var response string
+	for resp := range respChan {
+		if resp.Error != nil {
+			return nil, fmt.Errorf(
+				"planner: API error: %s",
+				resp.Error.Message)
+		}
+		if len(resp.Choices) > 0 {
+			response += resp.Choices[0].Message.Content
+		}
+	}
+
+	mode := normalizeMode(response)
+	if mode == "" {
+		return nil, fmt.Errorf(
+			"planner: unrecognised mode: %q", response)
+	}
+
+	plan := &cortexdb.RetrievalPlan{
+		RetrievalMode: mode,
+		Keywords:      extractKeywords(query),
+	}
+	return plan, nil
+}
+
+// normalizeMode maps the LLM response to a recognised retrieval mode.
+func normalizeMode(raw string) string {
+	raw = strings.TrimSpace(strings.ToLower(raw))
+	switch {
+	case strings.Contains(raw, "hybrid"):
+		return retrievalModeHybrid
+	case strings.Contains(raw, "vector"):
+		return retrievalModeVector
+	case strings.Contains(raw, "lexical"):
+		return retrievalModeLexical
+	default:
+		return ""
+	}
 }
 
 // heuristicPlan provides a deterministic fallback based on query
@@ -95,14 +172,12 @@ func (p *LLMQueryPlanner) heuristicPlan(
 	q := strings.ToLower(query)
 	wordCount := len(strings.Fields(q))
 
-	// Long/descriptive queries benefit from hybrid search.
 	if wordCount > 10 {
 		plan.RetrievalMode = retrievalModeHybrid
 		plan.Keywords = extractKeywords(query)
 		return plan
 	}
 
-	// Questions with abstract concepts benefit from vector search.
 	abstractMarkers := []string{
 		"why", "how", "explain", "concept", "idea",
 		"mean", "difference", "relation", "summary",
@@ -115,7 +190,6 @@ func (p *LLMQueryPlanner) heuristicPlan(
 		}
 	}
 
-	// Default: lexical search with keywords.
 	plan.Keywords = extractKeywords(query)
 	return plan
 }

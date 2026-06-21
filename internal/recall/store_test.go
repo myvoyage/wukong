@@ -220,6 +220,73 @@ func TestStore_SearchBySession(t *testing.T) {
 	}
 }
 
+// TestStore_SearchWithEmptyUserID verifies that Search() with
+// empty userID returns messages from ALL users (not just those
+// with empty user_id). This mirrors the FTS5 Search behavior
+// and was a bug in the LIKE fallback before the fix.
+func TestStore_SearchWithEmptyUserID(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := tmpDir + "/recall_emptyuid_test.db"
+	pool := util.NewDatabasePool(dbPath)
+	defer pool.Close()
+
+	cfg := &config.RecallConfig{
+		Backend:              "sqlite",
+		DBPath:               dbPath,
+		MaxResults:           10,
+		MaxMessagesPerSession: 100,
+	}
+	store, err := NewStore(cfg, pool)
+	if err != nil {
+		t.Fatalf("NewStore failed: %v", err)
+	}
+	defer store.Close()
+
+	// Store messages from two different users.
+	_ = store.StoreMessage(ChatMessage{
+		SessionID: "sess-x",
+		UserID:    "alice",
+		Role:      "user",
+		Content:   "I love Python programming",
+		CreatedAt: time.Now(),
+	})
+	_ = store.StoreMessage(ChatMessage{
+		SessionID: "sess-y",
+		UserID:    "bob",
+		Role:      "user",
+		Content:   "I use Go for backend services",
+		CreatedAt: time.Now(),
+	})
+
+	// Search with empty userID should return results from
+	// both users.
+	results, err := store.Search("programming", "", 5)
+	if err != nil {
+		t.Fatalf("Search with empty userID failed: %v", err)
+	}
+	if len(results) == 0 {
+		t.Fatal("expected at least 1 result with empty userID")
+	}
+	if len(results) < 1 {
+		t.Fatalf("expected results from at least 1 user, got %d",
+			len(results))
+	}
+
+	// Search with specific userID should only return that user.
+	aliceResults, err := store.Search("programming", "alice", 5)
+	if err != nil {
+		t.Fatalf("Search with alice userID failed: %v", err)
+	}
+	if len(aliceResults) == 0 {
+		t.Fatal("expected alice results")
+	}
+	for _, r := range aliceResults {
+		if r.Message.UserID != "alice" {
+			t.Errorf("expected alice, got %q", r.Message.UserID)
+		}
+	}
+}
+
 func TestSearchResult_Preview(t *testing.T) {
 	// Verify preview truncation is handled in SearchResult construction
 	sr := SearchResult{

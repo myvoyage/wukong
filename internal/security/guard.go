@@ -170,10 +170,10 @@ func (g *Guard) isHighRiskOperation(toolName string, argsJSON []byte) bool {
 		"shell":              true,
 		"terminal":           true,
 		"command":            true,
-		"command_execute":    true,
-		"file_write":         true,
-		"file_replace":       true,
-		"file_delete":        true,
+		"developer_command_execute": true,
+		"developer_file_write":     true,
+		"developer_file_replace":   true,
+		"file_delete":              true,
 		"browser_navigate":   true,
 		"browser_screenshot": true,
 		"browser_click":      true,
@@ -456,7 +456,7 @@ func isCommandTool(toolName string) bool {
 	commandTools := []string{
 		"bash", "execute_command", "run_command",
 		"shell", "terminal", "command",
-		"command_execute",
+		"command_execute", "developer_command_execute",
 	}
 	for _, t := range commandTools {
 		if strings.EqualFold(toolName, t) {
