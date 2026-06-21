@@ -8,8 +8,10 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"sync"
@@ -20,6 +22,10 @@ import (
 	"trpc.group/trpc-go/trpc-agent-go/runner"
 )
 
+// maxRequestBodySize limits incoming HTTP request body sizes to
+// prevent memory exhaustion from malicious payloads.
+const maxRequestBodySize = 10 << 20 // 10 MB
+
 // AGUIServer provides an SSE-based HTTP server that exposes
 // agent conversation capabilities to web-based chat UIs.
 type AGUIServer struct {
@@ -27,6 +33,7 @@ type AGUIServer struct {
 	path    string
 	mu      sync.RWMutex
 	running bool
+	server  *http.Server // set after Start, used for graceful Shutdown
 }
 
 // AGUIConfig configures the AG-UI server.
@@ -57,9 +64,14 @@ func (s *AGUIServer) Handler() http.Handler {
 	return mux
 }
 
-// Start begins listening on the given address.
+// Start begins listening on the given address. Uses *http.Server
+// internally so that Stop() can perform graceful shutdown.
 func (s *AGUIServer) Start(addr string) error {
 	s.mu.Lock()
+	s.server = &http.Server{
+		Addr:    addr,
+		Handler: s.Handler(),
+	}
 	s.running = true
 	s.mu.Unlock()
 
@@ -68,13 +80,28 @@ func (s *AGUIServer) Start(addr string) error {
 		"endpoint", s.path,
 	)
 
-	return http.ListenAndServe(addr, s.Handler())
+	return s.server.ListenAndServe()
+}
+
+// Stop gracefully shuts down the AG-UI server, waiting for active
+// connections to finish before returning.
+func (s *AGUIServer) Stop(ctx context.Context) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if !s.running || s.server == nil {
+		return nil
+	}
+
+	slog.Info("AG-UI server stopping")
+	s.running = false
+	return s.server.Shutdown(ctx)
 }
 
 // AGUIEvent represents a single SSE event in the AG-UI protocol.
 type AGUIEvent struct {
 	Type    string      `json:"type"`
-	Data    interface{} `json:"data,omitempty"`
+	Data    any `json:"data,omitempty"`
 	EventID string      `json:"event_id,omitempty"`
 }
 
@@ -96,13 +123,15 @@ func (s *AGUIServer) handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Parse request body.
+	// Parse request body with size limit to prevent memory exhaustion.
 	var req struct {
 		UserID    string `json:"user_id"`
 		SessionID string `json:"session_id"`
 		Message   string `json:"message"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.NewDecoder(
+		io.LimitReader(r.Body, maxRequestBodySize),
+	).Decode(&req); err != nil {
 		http.Error(w, "invalid request body", http.StatusBadRequest)
 		return
 	}
@@ -152,7 +181,7 @@ func (s *AGUIServer) handleChat(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Send completion event.
-	s.writeSSE(w, flusher, "done", map[string]interface{}{
+	s.writeSSE(w, flusher, "done", map[string]any{
 		"session_id": req.SessionID,
 		"full_text":  fullText,
 	})
@@ -187,17 +216,17 @@ func (s *AGUIServer) translateEvent(evt *event.Event, fullText *string) *AGUIEve
 
 		// Tool calls.
 		if len(choice.Message.ToolCalls) > 0 {
-			tools := make([]map[string]interface{}, 0,
+			tools := make([]map[string]any, 0,
 				len(choice.Message.ToolCalls))
 			for _, tc := range choice.Message.ToolCalls {
-				tools = append(tools, map[string]interface{}{
+				tools = append(tools, map[string]any{
 					"name":      tc.Function.Name,
 					"arguments": tc.Function.Arguments,
 				})
 			}
 			return &AGUIEvent{
 				Type: "tool_calls",
-				Data: map[string]interface{}{
+				Data: map[string]any{
 					"tools": tools,
 				},
 			}
@@ -210,7 +239,7 @@ func (s *AGUIServer) translateEvent(evt *event.Event, fullText *string) *AGUIEve
 // writeSSE sends a single SSE event.
 func (s *AGUIServer) writeSSE(
 	w http.ResponseWriter, flusher http.Flusher,
-	eventType string, data interface{},
+	eventType string, data any,
 ) {
 	jsonData, err := json.Marshal(data)
 	if err != nil {

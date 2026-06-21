@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"sync"
@@ -18,6 +19,10 @@ import (
 
 	"trpc.group/trpc-go/trpc-agent-go/tool"
 )
+
+// maxRequestBodySize limits incoming HTTP request body sizes to
+// prevent memory exhaustion from malicious payloads.
+const maxRequestBodySize = 10 << 20 // 10 MB
 
 // ACPMCPBridge exposes Wukong extensions as an MCP Server that
 // ACP agents can connect to for tool discovery and invocation.
@@ -49,7 +54,7 @@ type MCPListToolsResult struct {
 // MCPCallToolRequest is the parameters for tools/call.
 type MCPCallToolRequest struct {
 	Name      string                 `json:"name"`
-	Arguments map[string]interface{} `json:"arguments,omitempty"`
+	Arguments map[string]any `json:"arguments,omitempty"`
 }
 
 // MCPCallToolResponse is the result for tools/call.
@@ -67,7 +72,7 @@ type MCPContentItem struct {
 // MCPJSONRPCRequest is the standard MCP JSON-RPC request wrapper.
 type MCPJSONRPCRequest struct {
 	JSONRPC string          `json:"jsonrpc"`
-	ID      interface{}     `json:"id"`
+	ID      any     `json:"id"`
 	Method  string          `json:"method"`
 	Params  json.RawMessage `json:"params,omitempty"`
 }
@@ -75,8 +80,8 @@ type MCPJSONRPCRequest struct {
 // MCPJSONRPCResponse is the standard MCP JSON-RPC response wrapper.
 type MCPJSONRPCResponse struct {
 	JSONRPC string      `json:"jsonrpc"`
-	ID      interface{} `json:"id"`
-	Result  interface{} `json:"result,omitempty"`
+	ID      any `json:"id"`
+	Result  any `json:"result,omitempty"`
 	Error   *MCPError   `json:"error,omitempty"`
 }
 
@@ -185,7 +190,9 @@ func (b *ACPMCPBridge) handleMCP(
 	}
 
 	var req MCPJSONRPCRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.NewDecoder(
+		io.LimitReader(r.Body, maxRequestBodySize),
+	).Decode(&req); err != nil {
 		b.writeError(w, nil, -32700, "parse error")
 		return
 	}
@@ -205,15 +212,15 @@ func (b *ACPMCPBridge) handleMCP(
 
 // handleInitialize responds to the MCP initialize handshake.
 func (b *ACPMCPBridge) handleInitialize(
-	w http.ResponseWriter, id interface{},
+	w http.ResponseWriter, id any,
 ) {
-	b.writeResult(w, id, map[string]interface{}{
+	b.writeResult(w, id, map[string]any{
 		"protocolVersion": "2024-11-05",
 		"serverInfo": map[string]string{
 			"name":    "wukong-extensions",
 			"version": "1.0.0",
 		},
-		"capabilities": map[string]interface{}{
+		"capabilities": map[string]any{
 			"tools": map[string]bool{},
 		},
 	})
@@ -221,7 +228,7 @@ func (b *ACPMCPBridge) handleInitialize(
 
 // handleListTools returns all Wukong extension tools in MCP format.
 func (b *ACPMCPBridge) handleListTools(
-	w http.ResponseWriter, id interface{},
+	w http.ResponseWriter, id any,
 ) {
 	ctx := context.Background()
 	var tools []MCPToolInfo
@@ -258,7 +265,7 @@ func (b *ACPMCPBridge) handleListTools(
 // the result in MCP format.
 func (b *ACPMCPBridge) handleCallTool(
 	w http.ResponseWriter, r *http.Request,
-	id interface{}, params json.RawMessage,
+	id any, params json.RawMessage,
 ) {
 	var callReq MCPCallToolRequest
 	if err := json.Unmarshal(params, &callReq); err != nil {
@@ -352,7 +359,7 @@ func (b *ACPMCPBridge) handleCallTool(
 
 // writeResult writes a successful MCP JSON-RPC response.
 func (b *ACPMCPBridge) writeResult(
-	w http.ResponseWriter, id interface{}, result interface{},
+	w http.ResponseWriter, id any, result any,
 ) {
 	b.writeJSON(w, http.StatusOK, MCPJSONRPCResponse{
 		JSONRPC: "2.0",
@@ -363,7 +370,7 @@ func (b *ACPMCPBridge) writeResult(
 
 // writeError writes an MCP JSON-RPC error response.
 func (b *ACPMCPBridge) writeError(
-	w http.ResponseWriter, id interface{}, code int, message string,
+	w http.ResponseWriter, id any, code int, message string,
 ) {
 	b.writeJSON(w, http.StatusOK, MCPJSONRPCResponse{
 		JSONRPC: "2.0",
@@ -377,7 +384,7 @@ func (b *ACPMCPBridge) writeError(
 
 // writeJSON serializes and writes a JSON response.
 func (b *ACPMCPBridge) writeJSON(
-	w http.ResponseWriter, statusCode int, data interface{},
+	w http.ResponseWriter, statusCode int, data any,
 ) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(statusCode)

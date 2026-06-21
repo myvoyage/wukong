@@ -40,22 +40,25 @@ func (p *DatabasePool) GetDB() (*sql.DB, error) {
 		return p.db, nil
 	}
 
-	db, err := sql.Open("sqlite3", p.path)
+	db, err := sql.Open("sqlite3", p.path+
+		"?_journal_mode=WAL&_synchronous=NORMAL&_foreign_keys=ON"+
+		"&_busy_timeout=5000")
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite pool %q: %w", p.path, err)
 	}
 
-	// Optimize SQLite for concurrent access from multiple goroutines.
-	// WAL mode allows concurrent reads and a single writer.
-	db.SetMaxOpenConns(1)
-	db.SetMaxIdleConns(1)
+	// Allow up to 4 concurrent connections in WAL mode.
+	// WAL supports multiple readers + one writer with page-level
+	// locking. _busy_timeout=5000ms handles transient lock contention
+	// by waiting instead of immediately returning SQLITE_BUSY.
+	db.SetMaxOpenConns(4)
+	db.SetMaxIdleConns(2)
 
-	// Enable WAL mode for better concurrency
+	// Apply PRAGMAs (DSN params handle most, these are safety nets).
 	_, _ = db.Exec("PRAGMA journal_mode=WAL")
-	// Enable foreign keys
 	_, _ = db.Exec("PRAGMA foreign_keys=ON")
-	// Use normal synchronization for safety
 	_, _ = db.Exec("PRAGMA synchronous=NORMAL")
+	_, _ = db.Exec("PRAGMA busy_timeout=5000")
 
 	p.db = db
 	return db, nil

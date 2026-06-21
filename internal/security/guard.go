@@ -181,6 +181,12 @@ func (g *Guard) isHighRiskOperation(toolName string, argsJSON []byte) bool {
 		"web_fetch":          true,
 		"apps_create":        true,
 		"apps_deploy":        true,
+		// code_execute runs arbitrary JS in a sandboxed goja VM.
+		// While goja provides strong isolation, the tool exposes
+		// all other tool metadata via __tools and could be used
+		// for tool enumeration or ReDoS attacks.
+		"code_execute":        true,
+		"code_discover_tools": true,
 	}
 
 	if highRiskTools[toolLower] {

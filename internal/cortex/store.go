@@ -4,6 +4,7 @@ package cortex
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"time"
 
@@ -17,6 +18,8 @@ import (
 // CortexStore is a CortexDB-backed drop-in replacement for recall.Store.
 // When an embedder is configured, it uses CortexDB's HNSW vector index
 // for semantic search; otherwise falls back to FTS5.
+// The lexical store shares the same *sql.DB as session/memory/todo/recall
+// to avoid SQLite transaction conflicts.
 type CortexStore struct {
 	cfg      *config.CortexConfig
 	embedder *Embedder
@@ -26,9 +29,12 @@ type CortexStore struct {
 
 // NewStore creates a CortexStore. If embedding is configured, opens
 // a real CortexDB with HNSW vector index.
+// sharedDB is the *sql.DB from the DatabasePool, used by the lexical
+// store to avoid opening a separate connection to the same file.
 func NewStore(
 	cfg *config.CortexConfig,
 	embedder *Embedder,
+	sharedDB *sql.DB,
 ) (*CortexStore, error) {
 	dbPath := config.ResolvePath(cfg.DBPath)
 
@@ -37,8 +43,10 @@ func NewStore(
 		embedder: embedder,
 	}
 
-	// Always create lexical store for message table + FTS5.
-	lex, err := newLexicalStore(dbPath)
+	// Create lexical store using the shared DB connection to avoid
+	// SQLite "transaction has already been committed" errors caused
+	// by multiple independent connections to the same database file.
+	lex, err := newLexicalStore(sharedDB)
 	if err != nil {
 		return nil, fmt.Errorf("cortex: init lexical: %w", err)
 	}
@@ -176,12 +184,13 @@ func (s *CortexStore) DeleteSession(sessionID string) error {
 	return s.lexical.deleteSession(sessionID)
 }
 
-// Close performs a clean shutdown.
+// Close performs a clean shutdown. The lexical store's shared DB
+// is NOT closed here — the DatabasePool owner manages its lifecycle.
 func (s *CortexStore) Close() error {
 	if s.db != nil {
 		s.db.Close()
 	}
-	return s.lexical.close()
+	return s.lexical.close() // no-op: DB managed by DatabasePool
 }
 
 // RecallStore returns a *recall.Store adapter sharing the same DB.

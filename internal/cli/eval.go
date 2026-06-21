@@ -3,7 +3,6 @@ package cli
 import (
 	"context"
 	"fmt"
-	"os"
 
 	"github.com/spf13/cobra"
 
@@ -118,13 +117,13 @@ func runEval(cmd *cobra.Command, args []string) error {
 		}
 	}
 	if failures > 0 {
-		os.Exit(1)
+		return fmt.Errorf("%d of %d eval cases failed", failures, len(results))
 	}
 	return nil
 }
 
 // buildMetrics converts config MetricConfigs to eval.EvalMetric.
-func buildMetrics(cfg interface{}) []eval.EvalMetric {
+func buildMetrics(cfg any) []eval.EvalMetric {
 	// Default metrics if not configured.
 	return []eval.EvalMetric{
 		{Name: "tool_trajectory_match", Threshold: 0.6},

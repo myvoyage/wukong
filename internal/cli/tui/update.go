@@ -231,7 +231,7 @@ func (m *Model) trackProjectInstruction(input string) {
 	m.instrRecorded = true
 
 	// The project package defines Manager.UpdateInstruction;
-	// we use interface{} to avoid an import cycle with the
+	// we use any to avoid an import cycle with the
 	// tui package.
 	type instructionUpdater interface {
 		UpdateInstruction(workingDir string, instruction string)

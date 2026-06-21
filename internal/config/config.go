@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -1149,7 +1150,11 @@ func NewLoader(configPath string) (*Loader, error) {
 		if err == nil {
 			v.AddConfigPath(filepath.Join(homeDir, ".config", "wukong"))
 		}
-		v.AddConfigPath("/etc/wukong")
+		// /etc/wukong is only valid on Unix-like systems.
+		// On Windows, this path would be silently ignored by Viper.
+		if runtime.GOOS != "windows" {
+			v.AddConfigPath("/etc/wukong")
+		}
 	}
 
 	// Environment variable overrides: WUKONG_DEFAULT_PROVIDER, WUKONG_AGENT_TEMPERATURE, etc.

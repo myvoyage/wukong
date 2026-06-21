@@ -65,9 +65,9 @@ func (a *DifyAgent) Run(
 func (a *DifyAgent) Info() agent.Info {
 	return agent.Info{Name: a.name, Description: "Dify AI Platform Agent"}
 }
-func (a *DifyAgent) SubAgents() []agent.Agent    { return nil }
+func (a *DifyAgent) SubAgents() []agent.Agent        { return nil }
 func (a *DifyAgent) FindSubAgent(string) agent.Agent { return nil }
-func (a *DifyAgent) Tools() []tool.Tool           { return nil }
+func (a *DifyAgent) Tools() []tool.Tool              { return nil }
 
 // --- blocking ---
 
@@ -172,7 +172,7 @@ func (a *DifyAgent) runStream(
 func (a *DifyAgent) chatBlocking(
 	ctx context.Context, query string,
 ) (string, error) {
-	payload := map[string]interface{}{
+	payload := map[string]any{
 		"query":         query,
 		"response_mode": "blocking",
 		"user":          "wukong-dify",
@@ -194,7 +194,7 @@ func (a *DifyAgent) chatBlocking(
 func (a *DifyAgent) chatStreaming(
 	ctx context.Context, query string,
 ) (io.ReadCloser, error) {
-	payload := map[string]interface{}{
+	payload := map[string]any{
 		"query":         query,
 		"response_mode": "streaming",
 		"user":          "wukong-dify",
@@ -203,7 +203,7 @@ func (a *DifyAgent) chatStreaming(
 }
 
 func (a *DifyAgent) doRequest(
-	ctx context.Context, payload map[string]interface{},
+	ctx context.Context, payload map[string]any,
 ) (io.ReadCloser, error) {
 	body, _ := json.Marshal(payload)
 	req, err := http.NewRequestWithContext(

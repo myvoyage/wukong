@@ -27,10 +27,13 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
+	"strings"
 	"sync"
 
 	"github.com/google/uuid"
@@ -50,6 +53,7 @@ type ACPServer struct {
 	path    string
 	mu      sync.RWMutex
 	running bool
+	server  *http.Server // set after Start, used for graceful Shutdown
 }
 
 // ACPServerConfig configures the ACP server.
@@ -106,9 +110,14 @@ func (s *ACPServer) Handler() http.Handler {
 	return mux
 }
 
-// Start begins listening on the given address.
+// Start begins listening on the given address. Uses *http.Server
+// internally so that Stop() can perform graceful shutdown.
 func (s *ACPServer) Start(addr string) error {
 	s.mu.Lock()
+	s.server = &http.Server{
+		Addr:    addr,
+		Handler: s.Handler(),
+	}
 	s.running = true
 	s.mu.Unlock()
 
@@ -117,14 +126,22 @@ func (s *ACPServer) Start(addr string) error {
 		"path", s.path,
 	)
 
-	return http.ListenAndServe(addr, s.Handler())
+	return s.server.ListenAndServe()
 }
 
-// Stop signals shutdown.
-func (s *ACPServer) Stop() {
+// Stop gracefully shuts down the ACP server, waiting for active
+// connections to finish before returning.
+func (s *ACPServer) Stop(ctx context.Context) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	if !s.running || s.server == nil {
+		return nil
+	}
+
+	slog.Info("ACP server stopping")
 	s.running = false
+	return s.server.Shutdown(ctx)
 }
 
 // ==========================================================================
@@ -147,22 +164,22 @@ type ACPToolInfo struct {
 
 // ACPToolsListResponse is the response for tools/list.
 type ACPToolsListResponse struct {
-	AgentName    string         `json:"agent_name"`
-	Description  string         `json:"description"`
-	Tools        []ACPToolInfo  `json:"tools"`
-	Capabilities []string       `json:"capabilities"`
+	AgentName    string        `json:"agent_name"`
+	Description  string        `json:"description"`
+	Tools        []ACPToolInfo `json:"tools"`
+	Capabilities []string      `json:"capabilities"`
 }
 
 // ACPToolCallRequest is the request body for tools/call.
 type ACPToolCallRequest struct {
 	Name      string                 `json:"name"`
-	Arguments map[string]interface{} `json:"arguments"`
+	Arguments map[string]any `json:"arguments"`
 }
 
 // ACPSSEEvent represents a single SSE event.
 type ACPSSEEvent struct {
 	EventType string      `json:"event"`
-	Data      interface{} `json:"data"`
+	Data      any `json:"data"`
 }
 
 // ==========================================================================
@@ -187,7 +204,7 @@ func (s *ACPServer) handleAgentCard(
 ) {
 	agentInfo := s.agent.Info()
 
-	card := map[string]interface{}{
+	card := map[string]any{
 		"name":        agentInfo.Name,
 		"description": agentInfo.Description,
 		"version":     "0.4.0",
@@ -227,7 +244,9 @@ func (s *ACPServer) handleMessageSend(
 	}
 
 	var req ACPMessageSendRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.NewDecoder(
+		io.LimitReader(r.Body, maxRequestBodySize),
+	).Decode(&req); err != nil {
 		http.Error(w,
 			"invalid request body", http.StatusBadRequest)
 		return
@@ -265,7 +284,7 @@ func (s *ACPServer) handleMessageSend(
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		// Fallback: collect and return as single JSON.
-		var fullText string
+		var fullText strings.Builder
 		for evt := range events {
 			if evt.Error != nil {
 				s.writeJSON(w, http.StatusInternalServerError,
@@ -276,14 +295,14 @@ func (s *ACPServer) handleMessageSend(
 			}
 			if evt.Response != nil &&
 				len(evt.Response.Choices) > 0 {
-				fullText += evt.Response.Choices[0].
-					Delta.Content
+				fullText.WriteString(evt.Response.Choices[0].
+					Delta.Content)
 			}
 		}
 		s.writeJSON(w, http.StatusOK,
-			map[string]interface{}{
+			map[string]any{
 				"session_id": req.SessionID,
-				"response":   fullText,
+				"response":   fullText.String(),
 			})
 		return
 	}
@@ -300,7 +319,7 @@ func (s *ACPServer) handleMessageSend(
 	// Send completion event.
 	s.writeSSE(w, flusher, &ACPSSEEvent{
 		EventType: "done",
-		Data: map[string]interface{}{
+		Data: map[string]any{
 			"session_id": req.SessionID,
 			"full_text":  fullText,
 		},
@@ -370,7 +389,9 @@ func (s *ACPServer) handleToolsCall(
 	}
 
 	var req ACPToolCallRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.NewDecoder(
+		io.LimitReader(r.Body, maxRequestBodySize),
+	).Decode(&req); err != nil {
 		s.writeJSON(w, http.StatusBadRequest,
 			map[string]string{"error": "invalid request body"})
 		return
@@ -424,7 +445,7 @@ func (s *ACPServer) handleToolsCall(
 		return
 	}
 
-	s.writeJSON(w, http.StatusOK, map[string]interface{}{
+	s.writeJSON(w, http.StatusOK, map[string]any{
 		"success": true,
 		"result":  result,
 	})
@@ -467,10 +488,10 @@ func (s *ACPServer) translateEvent(
 
 		// Tool calls.
 		if len(choice.Message.ToolCalls) > 0 {
-			tools := make([]map[string]interface{}, 0,
+			tools := make([]map[string]any, 0,
 				len(choice.Message.ToolCalls))
 			for _, tc := range choice.Message.ToolCalls {
-				tools = append(tools, map[string]interface{}{
+				tools = append(tools, map[string]any{
 					"id":        tc.ID,
 					"name":      tc.Function.Name,
 					"arguments": string(tc.Function.Arguments),
@@ -478,7 +499,7 @@ func (s *ACPServer) translateEvent(
 			}
 			return &ACPSSEEvent{
 				EventType: "tool_calls",
-				Data: map[string]interface{}{
+				Data: map[string]any{
 					"tools": tools,
 				},
 			}
@@ -519,7 +540,7 @@ func (s *ACPServer) writeSSE(
 
 // writeJSON writes a JSON response.
 func (s *ACPServer) writeJSON(
-	w http.ResponseWriter, statusCode int, data interface{},
+	w http.ResponseWriter, statusCode int, data any,
 ) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(statusCode)
@@ -543,10 +564,10 @@ func (s *ACPServer) setCORSHeaders(w http.ResponseWriter) {
 // agent.Agent instance for ACP discovery.
 func BuildAgentCardFromAgent(
 	ag agent.Agent, baseURL string,
-) map[string]interface{} {
+) map[string]any {
 	info := ag.Info()
 
-	card := map[string]interface{}{
+	card := map[string]any{
 		"name":        info.Name,
 		"description": info.Description,
 		"version":     "0.4.0",

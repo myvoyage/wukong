@@ -2,6 +2,8 @@ package codemode
 
 import (
 	"context"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -194,5 +196,91 @@ func TestParseDiscoveredTools(t *testing.T) {
 				t.Log("array parsing returns tools")
 			}
 		})
+	}
+}
+
+func TestExecutor_ConcurrentLimit(t *testing.T) {
+	cfg := &config.CodeModeConfig{
+		Timeout:     10 * time.Second,
+		MaxMemoryMB: 128,
+	}
+	executor := NewExecutor(cfg)
+
+	// Fill all 5 concurrency slots.
+	var started sync.WaitGroup
+	var done sync.WaitGroup
+	results := make([]ExecutionResult, maxConcurrentExecutions+1)
+
+	for i := range maxConcurrentExecutions {
+		started.Add(1)
+		done.Add(1)
+		go func(idx int) {
+			started.Done()
+			// This blocks on the semaphore, then runs.
+			results[idx] = executor.Execute(
+				context.Background(), "1",
+			)
+			done.Done()
+		}(i)
+	}
+
+	// Wait for all goroutines to acquire their semaphore slots.
+	started.Wait()
+	time.Sleep(50 * time.Millisecond)
+
+	// The 6th call should be rejected immediately
+	// since all 5 slots are occupied.
+	result := executor.Execute(context.Background(), "1")
+	if result.Success {
+		t.Error("expected rejection when all concurrency slots are full")
+	}
+
+	// Wait for the first 5 to complete.
+	done.Wait()
+
+	// After they finish, a new call should succeed.
+	result2 := executor.Execute(context.Background(), "1")
+	if !result2.Success {
+		t.Errorf("expected success after slots freed, got: %s",
+			result2.Error)
+	}
+}
+
+func TestExecutor_JSONParseOversized(t *testing.T) {
+	executor := NewExecutor(nil)
+	ctx := context.Background()
+
+	// Build a JSON string larger than maxJSONParseSize (1MB).
+	largeJSON := `"` + strings.Repeat("x", maxJSONParseSize+100) + `"`
+	result := executor.Execute(ctx,
+		`JSON.parse(`+largeJSON+`)`)
+	if result.Success {
+		t.Error("expected oversized JSON.parse to be rejected")
+	}
+}
+
+func TestExecutor_RegExpDisabled(t *testing.T) {
+	executor := NewExecutor(nil)
+	ctx := context.Background()
+
+	// Attempting to use RegExp should result in a
+	// ReferenceError since it's set to Undefined.
+	result := executor.Execute(ctx,
+		`/test/.test("hello")`)
+	if result.Success {
+		t.Error("expected RegExp usage to fail (RegExp disabled)")
+	}
+}
+
+func TestExecutor_MathAbs(t *testing.T) {
+	executor := NewExecutor(nil)
+	ctx := context.Background()
+
+	result := executor.Execute(ctx, "Math.abs(-42)")
+	if !result.Success {
+		t.Fatalf("unexpected error: %s", result.Error)
+	}
+	if result.Output != "42" {
+		t.Errorf("expected Math.abs(-42)=42, got %s", result.Output)
 	}
 }

@@ -40,6 +40,7 @@ import (
 	"github.com/km269/wukong/internal/todo"
 	"github.com/km269/wukong/internal/topofmind"
 	"github.com/km269/wukong/internal/util"
+	"github.com/km269/wukong/pkg/sandbox"
 
 	"trpc.group/trpc-go/trpc-agent-go/model"
 	"trpc.group/trpc-go/trpc-agent-go/tool"
@@ -173,9 +174,13 @@ func runSession(cmd *cobra.Command, args []string) error {
 					"error", err.Error())
 			}
 		}
+		// Shutdown AG-UI server if running
+		if bootstrapState.AGUIServer != nil {
+			_ = bootstrapState.AGUIServer.Stop(context.Background())
+		}
 		// Shutdown ACP server if running
 		if bootstrapState.ACPServer != nil {
-			bootstrapState.ACPServer.Stop()
+			_ = bootstrapState.ACPServer.Stop(context.Background())
 		}
 		// Shutdown ACP MCP Bridge if running
 		if bootstrapState.ACPMCPBridge != nil {
@@ -211,8 +216,11 @@ func runSession(cmd *cobra.Command, args []string) error {
 					"error", err.Error())
 			}
 		}
+		if bootstrapState.AGUIServer != nil {
+			_ = bootstrapState.AGUIServer.Stop(context.Background())
+		}
 		if bootstrapState.ACPServer != nil {
-			bootstrapState.ACPServer.Stop()
+			_ = bootstrapState.ACPServer.Stop(context.Background())
 		}
 		if bootstrapState.ACPMCPBridge != nil {
 			if err := bootstrapState.ACPMCPBridge.Stop(); err != nil {
@@ -428,8 +436,17 @@ func bootstrapSession(
 				"model", wukongCfg.Cortex.EmbeddingModel,
 			)
 		}
+		// Get the shared *sql.DB from the pool to avoid opening
+		// a separate connection to the same database file.
+		// This prevents "transaction has already been committed"
+		// errors from concurrent session/memory/cortex writes.
+		sharedDB, dbErr := dbPool.GetDB()
+		if dbErr != nil {
+			util.Logger.Warn("cortex: get shared db failed",
+				slog.String("error", dbErr.Error()))
+		}
 		cortexStore, err = cortex.NewStore(
-			&wukongCfg.Cortex, embedder,
+			&wukongCfg.Cortex, embedder, sharedDB,
 		)
 		if err != nil {
 			util.Logger.Warn("cortex store init failed, "+
@@ -958,6 +975,21 @@ func bootstrapSession(
 			}()
 			state.ACPServer = acpSrv
 		}
+	}
+
+	// Report sandbox capability at startup so users know what
+	// filesystem write protection is active.
+	probe := sandbox.Probe()
+	if probe.Sandboxed {
+		util.Logger.Info("sandbox: filesystem write protection active",
+			"backend", probe.Backend,
+			"platform", probe.Platform,
+		)
+	} else {
+		util.Logger.Warn("sandbox: filesystem write protection unavailable",
+			"reason", sandbox.ReasonUnavailable(),
+			"warning", probe.Warning,
+		)
 	}
 
 	return wukongCfg, loop, state, nil

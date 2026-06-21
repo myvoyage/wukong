@@ -72,7 +72,7 @@ func (e *todoEnforcer) afterAgent(
 	}
 
 	// Parse the todo list from session state.
-	var todos []map[string]interface{}
+	var todos []map[string]any
 	if err := json.Unmarshal(todoBytes, &todos); err != nil {
 		return nil, nil
 	}

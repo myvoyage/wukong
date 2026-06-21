@@ -38,7 +38,7 @@ func NewMemoryToolSet(cfg *config.WukongConfig) *MemoryToolSet {
 
 // SetMemoryService injects the memory.Service and user key.
 // After injection, Tools() will return the standard tRPC tools.
-// The svc parameter is interface{} for loose coupling with the
+// The svc parameter is any for loose coupling with the
 // extension manager; it must be a memory.Service.
 func (ts *MemoryToolSet) SetMemoryService(
 	svc any, appName, userID string,

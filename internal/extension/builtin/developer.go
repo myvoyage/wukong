@@ -12,6 +12,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/km269/wukong/pkg/sandbox"
+
 	"trpc.group/trpc-go/trpc-agent-go/tool"
 	"trpc.group/trpc-go/trpc-agent-go/tool/function"
 )
@@ -248,28 +250,28 @@ func (ts *DeveloperToolSet) executeCommand(
 	execCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	// Use platform-appropriate shell:
-	// - Windows: cmd /C
-	// - Unix: sh -c
-	var cmd *exec.Cmd
+	// Build the command with sandbox filesystem write protection.
+	// On all supported platforms (Linux Landlock / macOS sandbox-exec /
+	// Windows Low IL), the child process can only write to the working
+	// dir and .wukong cache. Falls back safely if sandbox unavailable.
+	var shell, shellFlag string
 	if runtime.GOOS == "windows" {
-		cmd = exec.CommandContext(
-			execCtx, "cmd", "/C", req.Command,
-		)
+		shell, shellFlag = "cmd", "/C"
 	} else {
-		cmd = exec.CommandContext(
-			execCtx, "sh", "-c", req.Command,
-		)
+		shell, shellFlag = "sh", "-c"
 	}
+
+	sc := sandbox.CommandContext(execCtx, shell, shellFlag, req.Command)
 	if req.WorkDir != "" {
-		cmd.Dir = req.WorkDir
+		sc.Dir = req.WorkDir
+		sc.Policy.WritableDirs = []string{req.WorkDir, ".wukong"}
 	}
 
 	var stdout, stderr strings.Builder
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
+	sc.Stdout = &stdout
+	sc.Stderr = &stderr
 
-	err := cmd.Run()
+	err := sc.Run()
 	exitCode := 0
 	if err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok {
@@ -282,10 +284,11 @@ func (ts *DeveloperToolSet) executeCommand(
 		}
 	}
 
-	stdoutStr := stdout.String()
-	stderrStr := stderr.String()
+	return formatCommandOutput(stdout.String(), stderr.String(), exitCode)
+}
 
-	// Truncate long outputs
+// formatCommandOutput truncates and formats command output for consistent responses.
+func formatCommandOutput(stdoutStr, stderrStr string, exitCode int) (CommandExecuteRsp, error) {
 	const maxOutput = 8000
 	if len(stdoutStr) > maxOutput {
 		stdoutStr = stdoutStr[:maxOutput] +
@@ -295,7 +298,6 @@ func (ts *DeveloperToolSet) executeCommand(
 		stderrStr = stderrStr[:maxOutput] +
 			fmt.Sprintf("\n... (truncated, %d bytes total)", len(stderrStr))
 	}
-
 	return CommandExecuteRsp{
 		Success:  exitCode == 0,
 		Stdout:   stdoutStr,
@@ -326,8 +328,10 @@ func (ts *DeveloperToolSet) searchCode(
 		searchPath = "."
 	}
 
-	// Use ripgrep with system file exclusion
-	cmd := exec.CommandContext(
+	// Use sandbox-wrapped ripgrep with system file exclusion.
+	// The sandbox limits writes to the search path, preventing
+	// accidental modification of system files.
+	cmd := sandbox.CommandContext(
 		ctx, "rg", "--no-heading", "-n",
 		"--glob", "!.git",
 		"--glob", "!node_modules",
@@ -346,6 +350,8 @@ func (ts *DeveloperToolSet) searchCode(
 		"--glob", "!*.gz",
 		req.Pattern, searchPath,
 	)
+	cmd.Dir = searchPath
+	cmd.Policy.WritableDirs = []string{searchPath, ".wukong"}
 	output, err := cmd.Output()
 	if err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok {

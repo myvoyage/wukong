@@ -68,7 +68,7 @@ type Model struct {
 
 	// Project tracking
 	workingDir    string
-	projectMgr    interface{} // *project.Manager (avoids import cycle)
+	projectMgr    any // *project.Manager (avoids import cycle)
 	instrRecorded bool
 
 	// Layout
@@ -84,7 +84,7 @@ type ModelConfig struct {
 	UserID     string
 	SessionID  string
 	WorkingDir string
-	ProjectMgr interface{} // *project.Manager (avoids import cycle)
+	ProjectMgr any // *project.Manager (avoids import cycle)
 }
 
 // NewModel creates a new Bubbletea TUI model.
@@ -108,15 +108,15 @@ func NewModel(cfg ModelConfig) *Model {
 	}
 
 	return &Model{
-		viewport:    vp,
-		textarea:    ta,
-		userID:      cfg.UserID,
-		sessionID:   cfg.SessionID,
-		loop:        cfg.Loop,
-		cfg:         cfg.Config,
-		modelName:   modelDisplay,
-		workingDir:  cfg.WorkingDir,
-		projectMgr:  cfg.ProjectMgr,
+		viewport:   vp,
+		textarea:   ta,
+		userID:     cfg.UserID,
+		sessionID:  cfg.SessionID,
+		loop:       cfg.Loop,
+		cfg:        cfg.Config,
+		modelName:  modelDisplay,
+		workingDir: cfg.WorkingDir,
+		projectMgr: cfg.ProjectMgr,
 		messages: []chatEntry{
 			{Role: "system", Content: startupMsg},
 		},
@@ -490,7 +490,7 @@ func StartTUI(
 	loop *agent.CoreLoop,
 	userID, sessionID string,
 	workingDir string,
-	projectMgr interface{},
+	projectMgr any,
 ) error {
 	m := NewModel(ModelConfig{
 		Config:     cfg,

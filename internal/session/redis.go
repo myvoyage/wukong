@@ -327,7 +327,7 @@ func (s *RedisSessionService) saveSession(
 		SessionID: sess.ID,
 	}
 
-	meta := map[string]interface{}{
+	meta := map[string]any{
 		"app_name":   sess.AppName,
 		"user_id":    sess.UserID,
 		"session_id": sess.ID,
@@ -383,7 +383,7 @@ func (s *RedisSessionService) updateState(
 	if len(state) == 0 {
 		return nil
 	}
-	fields := make([]interface{}, 0, len(state)*2)
+	fields := make([]any, 0, len(state)*2)
 	for k, v := range state {
 		fields = append(fields, k, string(v))
 	}

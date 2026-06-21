@@ -301,6 +301,14 @@ func TestGuard_PermissionMode_Smart(t *testing.T) {
 	if !guard.NeedsApproval("file_delete", nil) {
 		t.Error("expected file_delete to need approval in smart mode")
 	}
+
+	// Code execution tools are high-risk (sandbox escape risk)
+	if !guard.NeedsApproval("code_execute", nil) {
+		t.Error("expected code_execute to need approval in smart mode")
+	}
+	if !guard.NeedsApproval("code_discover_tools", nil) {
+		t.Error("expected code_discover_tools to need approval in smart mode")
+	}
 }
 
 func TestGuard_SetPermissionMode(t *testing.T) {

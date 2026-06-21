@@ -345,8 +345,11 @@ func cleanupBootstrap(state *BootstrapState) {
 	if state.A2AServer != nil {
 		_ = state.A2AServer.Stop(context.Background())
 	}
+	if state.AGUIServer != nil {
+		_ = state.AGUIServer.Stop(context.Background())
+	}
 	if state.ACPServer != nil {
-		state.ACPServer.Stop()
+		_ = state.ACPServer.Stop(context.Background())
 	}
 	if state.ACPMCPBridge != nil {
 		_ = state.ACPMCPBridge.Stop()

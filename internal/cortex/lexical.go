@@ -2,8 +2,10 @@
 //
 // This file implements the lexical (non-vector) fallback storage
 // using SQLite + FTS5, plus a vector index table for embedding
-// similarity search. It mirrors the original recall/store.go
-// implementation but adds a vector index layer.
+// similarity search. It accepts a shared *sql.DB from the
+// DatabasePool to avoid opening a separate connection to the
+// same database file, which would cause SQLite transaction
+// conflicts ("transaction has already been committed" errors).
 package cortex
 
 import (
@@ -20,24 +22,18 @@ import (
 // lexicalStore is the SQLite-backed fallback that mirrors the
 // original recall.Store. It adds a vector index table alongside
 // the FTS5 full-text index for hybrid search.
+// Uses a shared *sql.DB from the DatabasePool to avoid
+// transaction conflicts with session/memory stores.
 type lexicalStore struct {
 	db *sql.DB
 }
 
-// newLexicalStore opens (or creates) the SQLite database and
-// initializes the schema (chat_recall + FTS5 + vector index).
-func newLexicalStore(dbPath string) (*lexicalStore, error) {
-	db, err := sql.Open("sqlite3",
-		dbPath+"?_journal_mode=WAL&_synchronous=NORMAL&_foreign_keys=ON")
-	if err != nil {
-		return nil, fmt.Errorf("open db: %w", err)
-	}
-	db.SetMaxOpenConns(1)
-	db.SetMaxIdleConns(1)
-
+// newLexicalStore initializes the schema on the shared database
+// connection. The caller (CortexStore) is responsible for
+// providing the shared *sql.DB from the DatabasePool.
+func newLexicalStore(db *sql.DB) (*lexicalStore, error) {
 	ls := &lexicalStore{db: db}
 	if err := ls.initSchema(); err != nil {
-		db.Close()
 		return nil, fmt.Errorf("init schema: %w", err)
 	}
 	return ls, nil
@@ -157,9 +153,13 @@ func (ls *lexicalStore) deleteSession(sessionID string) error {
 	return err
 }
 
-// close closes the database connection.
+// close is a no-op when the DB is shared via DatabasePool.
+// The pool owner (bootstrapSession) is responsible for closing
+// the shared connection through dbPool.Close().
+// Calling sql.DB.Close() on a shared connection would break
+// session, memory, and todo stores that use the same pool.
 func (ls *lexicalStore) close() error {
-	return ls.db.Close()
+	return nil
 }
 
 // ---------------------------------------------------------------------------
@@ -211,19 +211,19 @@ func (ls *lexicalStore) searchVector(
 
 	// Step 2: Compute cosine similarity for each candidate.
 	type candidate struct {
-		msgID       int64
-		sessionID   string
-		userID      string
-		role        string
-		content     string
-		similarity  float64
+		msgID      int64
+		sessionID  string
+		userID     string
+		role       string
+		content    string
+		similarity float64
 	}
 	var candidates []candidate
 
 	for rows.Next() {
 		var msgID int64
 		var sid, uid, vecJSON, snippet, role, content string
-		var createdAt interface{}
+		var createdAt any
 		if err := rows.Scan(&msgID, &sid, &uid,
 			&vecJSON, &snippet, &role, &content, &createdAt,
 		); err != nil {

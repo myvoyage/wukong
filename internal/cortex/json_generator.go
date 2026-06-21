@@ -91,9 +91,9 @@ func (g *LLMJSONGenerator) GenerateJSON(
 }
 
 func emptyResult() []byte {
-	data, _ := json.Marshal(map[string]interface{}{
-		"nodes": []interface{}{},
-		"edges": []interface{}{},
+	data, _ := json.Marshal(map[string]any{
+		"nodes": []any{},
+		"edges": []any{},
 	})
 	return data
 }

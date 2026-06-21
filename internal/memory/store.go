@@ -173,10 +173,11 @@ func (m *MemoryManager) Close() error {
 }
 
 // logMemoryHealth reports the current memory store health in
-// a background goroutine. Reports total count and oldest/newest
-// timestamps to help diagnose stale or missing memories.
+// a background goroutine. Uses a timeout to avoid blocking
+// startup if the database is locked.
 func (m *MemoryManager) logMemoryHealth() {
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
 	entries, err := m.Service().ReadMemories(
 		ctx,
 		memory.UserKey{AppName: "wukong-app", UserID: "*"},

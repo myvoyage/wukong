@@ -218,8 +218,6 @@ func (ts *ManagerToolSet) addDeeplink(
 
 	return DeeplinkRsp{
 		Success: true,
-		Message: fmt.Sprintf(
-			"Extension from deeplink added successfully",
-		),
+		Message: "Extension from deeplink added successfully",
 	}, nil
 }

@@ -47,7 +47,7 @@ func (e *Embedder) Embed(
 	}
 
 	// Build OpenAI-compatible request.
-	reqBody := map[string]interface{}{
+	reqBody := map[string]any{
 		"model": e.cfg.EmbeddingModel,
 		"input": texts,
 	}
@@ -110,7 +110,7 @@ func (e *Embedder) Embed(
 type embeddingResponse struct {
 	Data []struct {
 		Embedding []float64 `json:"embedding"`
-		Index     int        `json:"index"`
+		Index     int       `json:"index"`
 	} `json:"data"`
 }
 

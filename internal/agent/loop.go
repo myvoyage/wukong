@@ -63,6 +63,7 @@ type CoreLoop struct {
 
 	mu     sync.RWMutex
 	closed bool
+	bgWg   sync.WaitGroup // tracks background goroutines for graceful shutdown
 }
 
 // CoreLoopConfig holds the dependencies for creating a CoreLoop.
@@ -149,7 +150,11 @@ func NewCoreLoop(cfg CoreLoopConfig) (*CoreLoop, error) {
 			Mode:          WorkflowMode(workflowMode),
 			MaxIterations: cfg.Config.Workflow.MaxIterations,
 		}
-		ag, err = builder.Build(context.Background(), oc)
+		buildCtx, buildCancel := context.WithTimeout(
+			context.Background(), 30*time.Second,
+		)
+		defer buildCancel()
+		ag, err = builder.Build(buildCtx, oc)
 		if err != nil {
 			return nil, fmt.Errorf("build workflow agent: %w", err)
 		}
@@ -333,9 +338,14 @@ func NewCoreLoop(cfg CoreLoopConfig) (*CoreLoop, error) {
 				}
 			}
 			// 5. Flush and shut down telemetry (including
-			//    Langfuse if enabled).
+			//    Langfuse if enabled). Use a short timeout to
+			//    prevent shutdown from hanging on telemetry issues.
 			if cfg.TelemetryShutdown != nil {
-				if err := cfg.TelemetryShutdown(context.Background()); err != nil {
+				tsCtx, tsCancel := context.WithTimeout(
+					context.Background(), 10*time.Second,
+				)
+				defer tsCancel()
+				if err := cfg.TelemetryShutdown(tsCtx); err != nil {
 					errs = append(errs, err)
 				}
 			}
@@ -459,8 +469,8 @@ func (l *CoreLoop) Run(
 				"[Remembered facts from previous conversations]\n")
 			for i, m := range memories {
 				if m.Memory != nil && m.Memory.Memory != "" {
-					memCtx.WriteString(fmt.Sprintf(
-						"%d. %s\n", i+1, m.Memory.Memory))
+					fmt.Fprintf(&memCtx, "%d. %s\n",
+						i+1, m.Memory.Memory)
 				}
 			}
 			util.Logger.Info("memory: memories injected",
@@ -615,7 +625,9 @@ func (l *CoreLoop) RunStream(
 	// [Fix 3] Bridge MemoryFlow → tRPC Memory: promote extracted
 	// facts from conversation to the persistent memory store.
 	if l.memoryFlow != nil && responseText != "" {
+		l.bgWg.Add(1)
 		go func() {
+			defer l.bgWg.Done()
 			defer func() {
 				if r := recover(); r != nil {
 					util.Logger.Warn("memoryflow: promote panic",
@@ -675,9 +687,19 @@ func (l *CoreLoop) Close() error {
 	}
 	l.closed = true
 
-	// Create a span to track the shutdown process
+	// Wait for background goroutines (e.g. PromoteFacts) to finish
+	// before proceeding with shutdown. This prevents database
+	// access after connection close.
+	l.bgWg.Wait()
+
+	// Create a span to track the shutdown process with a timeout
+	// to avoid hanging on telemetry export issues.
 	tracer := otel.Tracer(tracerName)
-	_, span := tracer.Start(context.Background(), "agent.Close")
+	spanCtx, spanCancel := context.WithTimeout(
+		context.Background(), 5*time.Second,
+	)
+	defer spanCancel()
+	_, span := tracer.Start(spanCtx, "agent.Close")
 	defer span.End()
 
 	if l.closeFn != nil {
@@ -799,14 +821,18 @@ func createSingleAgent(
 		// The preload already handles the content; this is just
 		// a safety net in the system instruction.
 		if cfg.MemoryService != nil {
+			memCtx, memCancel := context.WithTimeout(
+				context.Background(), 5*time.Second,
+			)
 			entries, _ := cfg.MemoryService.ReadMemories(
-				context.Background(),
+				memCtx,
 				memory.UserKey{
 					AppName: "wukong-app",
 					UserID:  cfg.UserID,
 				},
 				0,
 			)
+			memCancel()
 			if len(entries) >= cfg.Config.Memory.MaxMemories-5 {
 				util.Logger.Warn("memory: near capacity",
 					"current", len(entries),
@@ -827,9 +853,12 @@ func createSingleAgent(
 		)
 		// Diagnostic: log all tool names from ToolSets to verify
 		// that memory tools are actually visible to the agent.
+		discCtx, discCancel := context.WithTimeout(
+			context.Background(), 5*time.Second,
+		)
 		var tsToolNames []string
 		for _, ts := range cfg.ToolSets {
-			for _, t := range ts.Tools(context.Background()) {
+			for _, t := range ts.Tools(discCtx) {
 				if d := t.Declaration(); d != nil {
 					tsToolNames = append(tsToolNames, d.Name)
 				}
@@ -839,6 +868,7 @@ func createSingleAgent(
 			"toolset_count", len(cfg.ToolSets),
 			"tool_names", tsToolNames,
 		)
+		discCancel()
 	}
 
 	if cfg.Config.Agent.MaxLLMCalls > 0 {
