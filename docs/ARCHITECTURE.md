@@ -374,20 +374,143 @@ MemoryFlowService.PromoteFacts(sessionID, userID)
 | `team_coordinator` | Leader 通过 AgentTool 委托 | Leader 将成员包装为工具，主动调度 |
 | `team_swarm` | 蜂群自主 transfer_to_agent | 依赖 Agent 自身判断进行任务转移 |
 
-### 5.3 Recipe System (recipe.go)
+### 5.3 Recipe System (recipe.go, recipe_tool.go, recipe_compose.go)
 
-基于 YAML 的结构化子 Agent 定义：
+基于 YAML 的结构化子 Agent 定义。每个 recipe 加载后注册为可被主 Agent 调用的工具，工具名前缀 `recipe-<name>`。
+
+**基础字段**（向后兼容，无新字段的 recipe 行为不变）：
 
 ```yaml
 # .wukong/recipes/code_reviewer.yaml
 name: code_reviewer
-description: Professional code reviewer
-system_prompt: |
-  You are a senior code reviewer...
-model:
-  provider: lmstudio
-  model: google/gemma-4-26b-a4b
-tools: [file_read, code_search, list_directory]
+description: "Professional code reviewer"
+instruction: "You are a senior code reviewer..."
+model: "gpt-4o"                    # 可选，覆盖默认模型
+tools: [file_read, code_search]    # 授权工具名列表
+temperature: 0.2                   # 默认 0.3
+max_tokens: 2048                   # 默认 1024
+max_iterations: 5                  # 默认 3
+skip_summarization: false          # 可选
+```
+
+**参数系统（P0）**：通过 `parameters` + `prompt` 让 recipe 可参数化复用。`prompt` 是 Go `text/template` 模板，渲染后作为子 Agent 的用户消息：
+
+```yaml
+name: code_reviewer
+description: "Parameterized code reviewer"
+instruction: "You are an expert code reviewer."
+prompt: |
+  Review the following {{.language}} code focusing on {{.focus}}:
+  {{.code}}
+parameters:
+  - key: language
+    description: "Programming language"
+    type: select              # string|number|boolean|select
+    required: true
+    options: [go, python, rust]
+  - key: focus
+    description: "Review focus area"
+    type: string
+    required: false
+    default: "all issues"
+  - key: code
+    description: "Code to review"
+    type: string
+    required: true
+```
+
+主 Agent 调用 `recipe-code_reviewer` 工具时传入 JSON 参数（如 `{"language":"go","focus":"security","code":"..."}`），`recipeTool` 校验参数、填充默认值、渲染 prompt 模板后传给子 Agent。
+
+> **条件渲染注意**：Go template 对非空字符串视为真。boolean 参数值为 `"false"` 时在 `{{if .flag}}` 中仍为真。需用 `{{if eq .flag "true"}}` 显式比较，或用空字符串表示假。
+
+**结构化输出（P0）**：通过 `response` 配置 JSON Schema，子 Agent 最终输出强制符合 schema：
+
+```yaml
+response:
+  json_schema:
+    type: object
+    properties:
+      issues:
+        type: array
+        items:
+          type: object
+          properties:
+            severity: {type: string}
+            message: {type: string}
+            line: {type: integer}
+      summary: {type: string}
+    required: [issues, summary]
+  strict: true                    # 严格模式（禁止额外字段）
+  validate_output: true           # P1-B: 校验返回的 JSON
+  description: "Structured review report"
+```
+
+底层利用 tRPC-Agent-Go 的 `llmagent.WithStructuredOutputJSONSchema`，通过模型原生的 response_format 机制约束输出（provider 支持时生效）。
+
+**重试与校验（P1-B）**：通过 `retry` 配置指数退避重试。配合 `response.validate_output: true`，输出校验失败时也会触发重试：
+
+```yaml
+retry:
+  max_attempts: 3                 # 总尝试次数（含首次）
+  initial_wait: "1s"              # 首次重试前等待
+  backoff_factor: 2.0             # 退避系数
+  max_wait: "30s"                 # 最大等待上限
+```
+
+重试逻辑由 `retryTool` 包装器实现（`recipe_compose.go`），包装在任何 `tool.CallableTool` 外层。重试条件：执行错误或输出校验失败。context 取消时立即终止。最终尝试仍失败时返回聚合错误。
+
+**子配方组合（P1-A）**：recipe 的 `tools` 列表可引用其他 recipe，实现层级编排。被引用的 recipe 工具会授权给引用方的子 Agent：
+
+```yaml
+# .wukong/recipes/orchestrator.yaml
+name: orchestrator
+description: "Delegates to sub-recipes"
+instruction: "You orchestrate code reviews."
+tools:
+  - file_read
+  - recipe-code_reviewer     # 引用其他 recipe（前缀形式）
+  - summarizer               # 或裸名形式
+```
+
+加载时通过拓扑排序确定构建顺序（被依赖的 recipe 先构建），循环依赖在加载时检测并拒绝。`mergeToolSets` 将基础工具和已构建的 recipe 工具合并，授予给当前 recipe 的子 Agent。
+
+**内联扩展（P2-A）**：recipe 可直接在 `config.yaml` 中定义，无需独立 YAML 文件：
+
+```yaml
+# config.yaml
+agent:
+  recipe_enabled: true
+  inline_recipes:
+    - name: quick-helper
+      description: "Quick helper"
+      instruction: "You are a quick helper."
+      tools: [file_read]
+      temperature: 0.3
+```
+
+内联 recipe 与文件 recipe 合并加载，同名时内联优先。通过 YAML marshal/unmarshal 往返转换 `map[string]any` → `RecipeConfig`，避免 config 与 agent 包间的循环依赖。
+
+**配方继承（P2-B）**：recipe 可通过 `extends` 继承另一个 recipe 的字段，子 recipe 非零字段覆盖父 recipe：
+
+```yaml
+# .wukong/recipes/security_reviewer.yaml
+name: security_reviewer
+extends: base_reviewer          # 继承 base_reviewer 的所有字段
+instruction: "You are a security-focused reviewer."  # 覆盖
+tools: [file_read, code_search, recipe-vuln_scanner]  # 覆盖
+temperature: 0.1                # 覆盖
+```
+
+继承链递归解析，循环 extends 在加载时检测并拒绝。`mergeRecipes` 执行深合并：标量字段子覆盖父，切片字段子非空时整体替换。
+
+**加载流水线**（`NewRecipeToolSet`，五阶段）：
+
+```
+Phase 1: 加载所有 recipe 配置（文件 + 内联）→ map[name]*RecipeConfig
+Phase 2: 解析 extends 继承链 → resolveAllExtends
+Phase 3: 拓扑排序子配方依赖 → topoSortRecipes
+Phase 4: 按序构建 recipe 工具（agenttool + recipeTool + retryTool 包装）
+Phase 5: 注册到工具集，返回给主 Agent
 ```
 
 ### 5.4 HITL 人机协同 (hitl.go)

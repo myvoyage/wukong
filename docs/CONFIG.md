@@ -177,7 +177,16 @@ agent:
 
   # === 提示模板 ===
   system_prompt_dir: "~/.config/wukong/prompts/" # 系统提示模板目录
-  # recipe_dir: "~/.config/wukong/recipes/"      # 配方文件目录
+
+  # === Recipe 系统 ===
+  recipe_enabled: true             # 启用 recipe 子 Agent
+  # recipe_dir: ".wukong/recipes/" # 配方文件目录
+  # inline_recipes:                # P2-A: 内联配方（直接在配置中定义）
+  #   - name: quick-helper
+  #     description: "Quick helper"
+  #     instruction: "You are a quick helper."
+  #     tools: [file_read]
+  #     temperature: 0.3
 ```
 
 ---

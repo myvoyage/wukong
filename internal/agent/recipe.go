@@ -3,7 +3,7 @@
 // each defines a named sub-agent with its own instruction, tool list,
 // and model configuration.
 //
-// Recipe YAML schema:
+// Recipe YAML schema (base fields):
 //
 //	name: my-reviewer
 //	description: "Expert code reviewer for security audits"
@@ -16,6 +16,54 @@
 //	max_tokens: 2048         # optional (default: 1024)
 //	max_iterations: 5        # optional (default: 3)
 //	skip_summarization: false # optional
+//
+// Parameterized recipes (P0) add prompt and parameters fields:
+//
+//	name: code-reviewer
+//	prompt: |
+//	  Review the following {{.language}} code focusing on {{.focus}}:
+//	  {{.code}}
+//	parameters:
+//	  - key: language
+//	    type: select
+//	    required: true
+//	    options: [go, python, rust]
+//
+// Structured output (P0) constrains the final response:
+//
+//	response:
+//	  json_schema: {type: object, ...}
+//	  strict: true
+//	  validate_output: true   # P1-B: validate returned JSON
+//
+// Retry (P1-B) wraps execution with exponential backoff:
+//
+//	retry:
+//	  max_attempts: 3
+//	  initial_wait: "1s"
+//	  backoff_factor: 2.0
+//	  max_wait: "30s"
+//
+// Sub-recipe composition (P1-A): recipes can reference other recipes
+// in their tools list. Circular dependencies are detected at load time:
+//
+//	tools:
+//	  - file_read
+//	  - recipe-sub-reviewer   # or just "sub-reviewer"
+//
+// Recipe extends (P2-B): inherit fields from another recipe:
+//
+//	name: security-reviewer
+//	extends: base-reviewer
+//	instruction: "You are a security-focused reviewer."  # overrides
+//
+// Inline recipes (P2-A): define recipes directly in config.yaml:
+//
+//	agent:
+//	  inline_recipes:
+//	    - name: quick-helper
+//	      description: "Quick helper"
+//	      instruction: "You are a quick helper."
 //
 // Recipes are registered as tools callable by the main agent.
 // The tool name is prefixed with "recipe-" (e.g., recipe-my-reviewer).
@@ -52,11 +100,38 @@ type RecipeConfig struct {
 	Description string `yaml:"description"`
 	// Instruction is the system prompt for the sub-agent.
 	Instruction string `yaml:"instruction"`
+	// Prompt is an optional parameterized task template rendered
+	// with Go text/template syntax ({{.ParamKey}}). When set
+	// together with Parameters, the rendered text is passed as the
+	// sub-agent's user message. Without Parameters, Prompt is
+	// ignored.
+	Prompt string `yaml:"prompt"`
+	// Parameters defines dynamic inputs the main agent supplies.
+	// When non-empty, the recipe is wrapped in a recipeTool that
+	// validates and renders parameters into Prompt before invoking
+	// the sub-agent.
+	Parameters []RecipeParameter `yaml:"parameters"`
+	// Response constrains the sub-agent's final output to a JSON
+	// schema when set. Uses the model-native response_format
+	// mechanism.
+	Response *RecipeResponseConfig `yaml:"response"`
+	// Retry configures retry behavior for recipe execution. When
+	// set, the recipe tool is wrapped with exponential backoff
+	// retry. See RecipeRetryConfig for details.
+	Retry *RecipeRetryConfig `yaml:"retry"`
+	// Extends names another recipe to inherit fields from. The
+	// child recipe's non-zero fields override the parent's. The
+	// extends chain is resolved recursively; circular extends are
+	// rejected at load time.
+	Extends string `yaml:"extends"`
 	// Model overrides the default model for this recipe (optional).
 	Model string `yaml:"model"`
 	// Tools lists the tool names to grant to this sub-agent.
 	// If empty, no tools are granted (instruction-only).
-	// Example: ["file_read", "code_search", "directory_list"]
+	// May include recipe references: "recipe-<name>" or "<name>"
+	// where <name> is a loaded recipe. Circular dependencies are
+	// detected at load time.
+	// Example: ["file_read", "code_search", "recipe-sub-reviewer"]
 	Tools []string `yaml:"tools"`
 	// Temperature controls LLM sampling randomness (0.0-2.0).
 	// Default: 0.3.
@@ -86,11 +161,19 @@ type RecipeToolSet struct {
 	subAgents []agent.Agent
 }
 
-// NewRecipeToolSet scans the configured recipe directory for .yaml files,
-// creates an LLMAgent per recipe, and wraps them as tools callable by
-// the main agent.
+// NewRecipeToolSet scans the configured recipe directory for .yaml
+// files and inline recipe definitions from config, creates an
+// LLMAgent per recipe, and wraps them as tools callable by the main
+// agent.
 //
-// Returns nil if recipe_enabled is false or the directory is empty.
+// Loading phases:
+//  1. All recipe configs (file-based + inline) loaded into a map.
+//  2. Recipe extends chains resolved (P2-B).
+//  3. Recipes topologically sorted by sub-recipe deps (P1-A).
+//  4. Recipes built in dependency order, granting sub-recipe tools.
+//  5. Recipes with retry config wrapped with retry logic (P1-B).
+//
+// Returns nil if recipe_enabled is false or no recipes are found.
 func NewRecipeToolSet(
 	factory *provider.Factory,
 	agentCfg *config.AgentConfig,
@@ -100,24 +183,148 @@ func NewRecipeToolSet(
 		return nil
 	}
 
-	dir := agentCfg.RecipeDir
+	// Phase 1: Load all recipe configs.
+	recipes := make(map[string]*RecipeConfig)
+	loadFileRecipes(recipes, agentCfg.RecipeDir)
+	loadInlineRecipes(recipes, agentCfg.InlineRecipes)
+
+	if len(recipes) == 0 {
+		return nil
+	}
+
+	// Phase 2: Resolve extends (P2-B).
+	resolved, err := resolveAllExtends(recipes)
+	if err != nil {
+		util.Logger.Warn("recipe: failed to resolve extends",
+			slog.String("error", err.Error()))
+		resolved = recipes
+	}
+
+	// Phase 3: Topological sort by sub-recipe deps (P1-A).
+	recipeNames := make(map[string]bool, len(resolved))
+	for name := range resolved {
+		recipeNames[name] = true
+	}
+	order, err := topoSortRecipes(resolved)
+	if err != nil {
+		util.Logger.Error("recipe: dependency sort failed",
+			slog.String("error", err.Error()))
+		return nil
+	}
+
+	mdl, err := factory.CreateDefaultModel()
+	if err != nil {
+		util.Logger.Warn("recipe: failed to create model",
+			slog.String("error", err.Error()))
+		return nil
+	}
+
+	baseTools := make(map[string]tool.Tool)
+	for _, t := range allTools {
+		if decl := t.Declaration(); decl != nil {
+			baseTools[decl.Name] = t
+		}
+	}
+
+	// Phase 4: Build recipe tools in dependency order.
+	recipeRegistry := make(map[string]tool.Tool)
+	ts := &RecipeToolSet{}
+
+	for _, name := range order {
+		recipe, ok := resolved[name]
+		if !ok {
+			continue
+		}
+
+		grantedTools := mergeToolSets(
+			baseTools, recipeRegistry, recipe, recipeNames)
+
+		subAgent := createRecipeAgent(recipe, mdl, grantedTools)
+		ts.subAgents = append(ts.subAgents, subAgent)
+
+		t := agenttool.NewTool(subAgent,
+			agenttool.WithSkipSummarization(
+				recipe.SkipSummarization),
+			agenttool.WithStreamInner(false),
+			agenttool.WithResponseMode(
+				agenttool.ResponseModeFinalOnly,
+			),
+		)
+
+		var finalTool tool.Tool = t
+		if len(recipe.Parameters) > 0 && recipe.Prompt != "" {
+			rt, rtErr := newRecipeTool(t, recipe)
+			if rtErr != nil {
+				util.Logger.Warn("recipe: skip parameterized wrapper",
+					slog.String("name", recipe.Name),
+					slog.String("error", rtErr.Error()))
+			} else {
+				finalTool = rt
+			}
+		}
+
+		if recipe.Retry != nil {
+			callTool, ok := finalTool.(tool.CallableTool)
+			if !ok {
+				util.Logger.Warn("recipe: retry config ignored",
+					slog.String("name", recipe.Name))
+			} else {
+				validator := buildOutputValidator(
+					recipe.Response)
+				if recipe.Response == nil ||
+					!recipe.Response.ValidateOutput {
+					validator = nil
+				}
+				finalTool = newRetryTool(
+					callTool, recipe.Retry, validator)
+			}
+		}
+
+		recipeRegistry[name] = finalTool
+		ts.tools = append(ts.tools, finalTool)
+
+		util.Logger.Info("recipe: registered",
+			slog.String("name", recipe.Name),
+			slog.Int("tools", len(recipe.Tools)),
+			slog.Bool("retry", recipe.Retry != nil),
+			slog.Bool("parameterized",
+				len(recipe.Parameters) > 0 &&
+					recipe.Prompt != ""),
+		)
+	}
+
+	if len(ts.tools) == 0 {
+		return nil
+	}
+
+	util.Logger.Info("recipe: loaded recipes",
+		slog.Int("count", len(ts.tools)))
+
+	return ts
+}
+
+// loadFileRecipes loads recipe YAML files from the configured
+// directory into the recipes map.
+func loadFileRecipes(
+	recipes map[string]*RecipeConfig,
+	recipeDir string,
+) {
+	dir := recipeDir
 	if dir == "" {
 		dir = ".wukong/recipes/"
 	}
 
-	// Expand ~ and resolve.
 	if len(dir) >= 2 && dir[:2] == "~/" {
 		home, err := os.UserHomeDir()
 		if err != nil {
 			util.Logger.Warn("recipe: cannot resolve home dir",
 				slog.String("error", err.Error()))
-			return nil
+			return
 		}
 		dir = filepath.Join(home, dir[2:])
 	}
 	dir = config.ResolvePath(dir)
 
-	// Try finding the dir relative to cwd if absolute doesn't exist.
 	if _, err := os.Stat(dir); os.IsNotExist(err) {
 		if wd, wdErr := os.Getwd(); wdErr == nil {
 			alt := filepath.Join(wd, ".wukong", "recipes")
@@ -130,11 +337,10 @@ func NewRecipeToolSet(
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		util.Logger.Info("recipe: no recipes directory found",
-			"dir", dir)
-		return nil
+			slog.String("dir", dir))
+		return
 	}
 
-	// Collect .yaml / .yml files sorted by name.
 	var yamlFiles []string
 	for _, e := range entries {
 		if e.IsDir() {
@@ -147,69 +353,90 @@ func NewRecipeToolSet(
 		}
 	}
 
-	if len(yamlFiles) == 0 {
-		return nil
-	}
-
-	mdl, err := factory.CreateDefaultModel()
-	if err != nil {
-		util.Logger.Warn("recipe: failed to create model",
-			"error", err.Error())
-		return nil
-	}
-
-	// Build a tool name set for filtering.
-	toolNames := make(map[string]tool.Tool)
-	for _, t := range allTools {
-		if decl := t.Declaration(); decl != nil {
-			toolNames[decl.Name] = t
-		}
-	}
-
-	ts := &RecipeToolSet{}
-
 	for _, fileName := range yamlFiles {
 		recipe, err := loadRecipeFile(
 			filepath.Join(dir, fileName))
 		if err != nil {
 			util.Logger.Warn("recipe: failed to load",
-				"file", fileName, "error", err.Error())
+				slog.String("file", fileName),
+				slog.String("error", err.Error()))
 			continue
 		}
 		if recipe.Name == "" {
 			util.Logger.Warn("recipe: skipping unnamed recipe",
-				"file", fileName)
+				slog.String("file", fileName))
 			continue
 		}
+		recipes[recipe.Name] = recipe
+	}
+}
 
-		subAgent := createRecipeAgent(recipe, mdl, toolNames)
-		ts.subAgents = append(ts.subAgents, subAgent)
+// loadInlineRecipes loads recipe definitions from config's
+// inline_recipes field (P2-A).
+func loadInlineRecipes(
+	recipes map[string]*RecipeConfig,
+	inline []map[string]any,
+) {
+	for i, raw := range inline {
+		recipe, err := loadInlineRecipe(raw)
+		if err != nil {
+			util.Logger.Warn("recipe: failed to load inline recipe",
+				slog.Int("index", i),
+				slog.String("error", err.Error()))
+			continue
+		}
+		if recipe.Name == "" {
+			util.Logger.Warn("recipe: skipping unnamed inline recipe",
+				slog.Int("index", i))
+			continue
+		}
+		recipes[recipe.Name] = recipe
+		util.Logger.Info("recipe: loaded inline recipe",
+			slog.String("name", recipe.Name))
+	}
+}
 
-		t := agenttool.NewTool(subAgent,
-			agenttool.WithSkipSummarization(
-				recipe.SkipSummarization),
-			agenttool.WithStreamInner(false),
-			agenttool.WithResponseMode(
-				agenttool.ResponseModeFinalOnly,
-			),
-		)
-		ts.tools = append(ts.tools, t)
+// loadInlineRecipe converts a config map to a RecipeConfig via
+// YAML marshal/unmarshal round-trip.
+func loadInlineRecipe(raw map[string]any) (*RecipeConfig, error) {
+	data, err := yaml.Marshal(raw)
+	if err != nil {
+		return nil, fmt.Errorf("marshal inline recipe: %w", err)
+	}
+	var recipe RecipeConfig
+	if err := yaml.Unmarshal(data, &recipe); err != nil {
+		return nil, fmt.Errorf("parse inline recipe: %w", err)
+	}
+	return &recipe, nil
+}
 
-		util.Logger.Info("recipe: registered",
-			slog.String("name", recipe.Name),
-			slog.Int("tools", len(recipe.Tools)),
-		)
+// mergeToolSets builds the tool set for a recipe's sub-agent,
+// including base tools and available sub-recipe tools (P1-A).
+// Only tools listed in recipe.Tools are included. Recipe tool
+// references can be bare ("reviewer") or prefixed
+// ("recipe-reviewer").
+func mergeToolSets(
+	baseTools map[string]tool.Tool,
+	recipeRegistry map[string]tool.Tool,
+	recipe *RecipeConfig,
+	recipeNames map[string]bool,
+) map[string]tool.Tool {
+	result := make(map[string]tool.Tool)
+
+	for _, name := range recipe.Tools {
+		ref := normalizeRecipeRef(name, recipeNames)
+		if ref != "" {
+			if rt, ok := recipeRegistry[ref]; ok {
+				result[name] = rt
+			}
+			continue
+		}
+		if t, ok := baseTools[name]; ok {
+			result[name] = t
+		}
 	}
 
-	if len(ts.tools) == 0 {
-		return nil
-	}
-
-	util.Logger.Info("recipe: loaded recipes",
-		slog.Int("count", len(ts.tools)),
-		slog.String("dir", dir))
-
-	return ts
+	return result
 }
 
 // Tools returns the recipe sub-agent tools.
@@ -294,6 +521,16 @@ func createRecipeAgent(
 		if len(granted) > 0 {
 			opts = append(opts, llmagent.WithTools(granted))
 		}
+	}
+
+	// Constrain final output to a JSON schema when configured.
+	if recipe.Response != nil && len(recipe.Response.JSONSchema) > 0 {
+		opts = append(opts, llmagent.WithStructuredOutputJSONSchema(
+			recipe.Name,
+			recipe.Response.JSONSchema,
+			recipe.Response.Strict,
+			recipe.Response.Description,
+		))
 	}
 
 	name := "recipe-" + recipe.Name

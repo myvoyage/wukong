@@ -391,6 +391,14 @@ type AgentConfig struct {
 	// RecipeEnabled controls whether YAML recipe sub-agents are
 	// loaded and registered. Default: true.
 	RecipeEnabled bool `mapstructure:"recipe_enabled"`
+	// InlineRecipes defines recipe sub-agent configurations directly
+	// in the config file, without requiring separate YAML files.
+	// Each entry is a map that follows the same schema as a recipe
+	// YAML file (name, description, instruction, tools, etc.).
+	// Inline recipes are merged with file-based recipes from
+	// RecipeDir; name collisions are resolved in favor of inline
+	// recipes.
+	InlineRecipes []map[string]any `mapstructure:"inline_recipes"`
 }
 
 // ============================================================================
