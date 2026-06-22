@@ -72,6 +72,45 @@ func (f *Factory) CreateModel(name string) (model.Model, error) {
 	}
 }
 
+// CreateModelWithName creates a model instance for the given provider
+// but overrides the configured model name. If providerName is empty,
+// the default provider is used.
+func (f *Factory) CreateModelWithName(
+	providerName string,
+	modelName string,
+) (model.Model, error) {
+	p := f.cfg.FindProvider(providerName)
+	if p == nil {
+		if providerName == "" {
+			p = f.cfg.DefaultProviderConfig()
+		}
+		if p == nil {
+			return nil, fmt.Errorf(
+				"provider %q not found and no default configured",
+				providerName,
+			)
+		}
+	}
+
+	f.fillDefaultBaseURL(p)
+
+	switch p.Type {
+	case "openai", "anthropic", "google", "deepseek",
+		"ollama", "lmstudio":
+		opts := []openai.Option{
+			openai.WithBaseURL(p.BaseURL),
+			openai.WithAPIKey(p.APIKey),
+		}
+		return openai.New(modelName, opts...), nil
+	case "acp":
+		return f.createACP(p)
+	default:
+		return nil, fmt.Errorf(
+			"unsupported provider type: %s", p.Type,
+		)
+	}
+}
+
 // CreateDefaultModel creates a model instance for the default provider.
 func (f *Factory) CreateDefaultModel() (model.Model, error) {
 	return f.CreateModel("")

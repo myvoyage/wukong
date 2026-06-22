@@ -17,7 +17,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync"
 	"text/template"
+	"time"
 
 	"trpc.group/trpc-go/trpc-agent-go/tool"
 	agenttool "trpc.group/trpc-go/trpc-agent-go/tool/agent"
@@ -96,16 +98,27 @@ type recipeInner interface {
 
 // recipeTool wraps an agent tool with parameter support.
 //
-// It implements tool.CallableTool. The inner tool retains all its
-// original call semantics (history scope, response mode, streaming);
-// recipeTool only customizes the Declaration (to expose parameters to
-// the main agent) and preprocesses Call arguments (validate, fill
-// defaults, render prompt template).
+// It implements tool.CallableTool and MetricsCollector. The inner
+// tool retains all its original call semantics (history scope,
+// response mode, streaming); recipeTool only customizes the
+// Declaration (to expose parameters to the main agent) and
+// preprocesses Call arguments (validate, fill defaults, render
+// templates).
 type recipeTool struct {
 	inner      recipeInner
+	recipeName string
 	params     []RecipeParameter
 	promptTmpl *template.Template
+	instrTmpl  *template.Template // P4-A: optional instruction template
 	decl       *tool.Declaration
+	// P4-B: execution metrics.
+	mu      sync.Mutex
+	metrics RecipeMetrics
+}
+
+// Name returns the recipe name (implements MetricsCollector).
+func (rt *recipeTool) Name() string {
+	return rt.recipeName
 }
 
 // newRecipeTool builds a recipeTool from a recipe configuration and
@@ -117,6 +130,39 @@ func newRecipeTool(
 	recipe *RecipeConfig,
 ) (*recipeTool, error) {
 	return newRecipeToolWithInner(inner, recipe)
+}
+
+// RecipeMetrics tracks execution statistics for a recipe tool (P4-B).
+type RecipeMetrics struct {
+	CallCount    int           `json:"call_count"`
+	SuccessCount int           `json:"success_count"`
+	ErrorCount   int           `json:"error_count"`
+	RetryCount   int           `json:"retry_count"`
+	TotalDuration time.Duration `json:"-"`
+	LastDuration time.Duration `json:"-"`
+	LastError    string        `json:"last_error,omitempty"`
+	LastCallAt   time.Time     `json:"last_call_at,omitempty"`
+}
+
+// snapshot returns a copy of the metrics for safe external use.
+func (m *RecipeMetrics) snapshot() RecipeMetrics {
+	return RecipeMetrics{
+		CallCount:     m.CallCount,
+		SuccessCount:  m.SuccessCount,
+		ErrorCount:    m.ErrorCount,
+		RetryCount:    m.RetryCount,
+		TotalDuration: m.TotalDuration,
+		LastDuration:  m.LastDuration,
+		LastError:     m.LastError,
+		LastCallAt:    m.LastCallAt,
+	}
+}
+
+// Metrics returns a snapshot of the current execution metrics.
+func (rt *recipeTool) Metrics() RecipeMetrics {
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	return rt.metrics.snapshot()
 }
 
 // newRecipeToolWithInner is the testable constructor that accepts
@@ -134,10 +180,28 @@ func newRecipeToolWithInner(
 
 	rt := &recipeTool{
 		inner:      inner,
+		recipeName: recipe.Name,
 		params:     recipe.Parameters,
 		promptTmpl: tmpl,
 		decl:       buildRecipeDeclaration(recipe, inner),
 	}
+
+	// P4-A: Parse instruction template if it uses template syntax.
+	if recipe.Instruction != "" &&
+		strings.Contains(recipe.Instruction, "{{") {
+		instrTmpl, iErr := template.New(
+			"recipe-instr-" + recipe.Name,
+		).Parse(recipe.Instruction)
+		if iErr != nil {
+			return nil, fmt.Errorf(
+				"parse instruction template: %w", iErr)
+		}
+		rt.instrTmpl = instrTmpl
+	}
+
+	// P4-B: Register for metrics collection.
+	registerMetricsCollector(rt)
+
 	return rt, nil
 }
 
@@ -149,28 +213,74 @@ func (rt *recipeTool) Declaration() *tool.Declaration {
 	return rt.decl
 }
 
-// Call validates parameters, renders the prompt template, and
-// forwards the rendered text to the inner agenttool.Tool.
+// Call validates parameters, renders templates, and forwards the
+// rendered text to the inner agenttool.Tool.
 //
-// The main agent supplies a JSON object whose keys match parameter
-// Keys. Missing optional parameters are filled with their Default.
-// After rendering, the text is passed as []byte to inner.Call,
-// which the agenttool treats as the sub-agent's user message.
+// P4-A: If an instruction template is present, it is rendered with
+// the same parameters and prepended to the user message as a system
+// context block.
+//
+// P4-B: Execution metrics (duration, success/error count) are
+// recorded on every call.
 func (rt *recipeTool) Call(
 	ctx context.Context,
 	jsonArgs []byte,
 ) (any, error) {
+	start := time.Now()
+
 	paramMap, err := validateAndExtractParams(rt.params, jsonArgs)
 	if err != nil {
+		rt.recordError(err)
 		return nil, err
+	}
+
+	// P4-A: Render instruction template if present.
+	var message string
+	if rt.instrTmpl != nil {
+		instrText, iErr := renderPrompt(
+			rt.instrTmpl, paramMap)
+		if iErr != nil {
+			rt.recordError(iErr)
+			return nil, iErr
+		}
+		message = "[Context]\n" + instrText + "\n\n"
 	}
 
 	rendered, err := renderPrompt(rt.promptTmpl, paramMap)
 	if err != nil {
+		rt.recordError(err)
 		return nil, err
 	}
+	message += rendered
 
-	return rt.inner.Call(ctx, []byte(rendered))
+	result, err := rt.inner.Call(ctx, []byte(message))
+
+	rt.mu.Lock()
+	rt.metrics.CallCount++
+	rt.metrics.LastDuration = time.Since(start)
+	rt.metrics.TotalDuration += rt.metrics.LastDuration
+	rt.metrics.LastCallAt = time.Now()
+	if err != nil {
+		rt.metrics.ErrorCount++
+		rt.metrics.LastError = err.Error()
+	} else {
+		rt.metrics.SuccessCount++
+		rt.metrics.LastError = ""
+	}
+	rt.mu.Unlock()
+
+	return result, err
+}
+
+// recordError records a pre-execution error (e.g. param validation
+// failure) that prevented the inner tool from being called.
+func (rt *recipeTool) recordError(err error) {
+	rt.mu.Lock()
+	rt.metrics.CallCount++
+	rt.metrics.ErrorCount++
+	rt.metrics.LastError = err.Error()
+	rt.metrics.LastCallAt = time.Now()
+	rt.mu.Unlock()
 }
 
 // buildRecipeDeclaration constructs the tool.Declaration for a
