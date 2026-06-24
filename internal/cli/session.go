@@ -15,6 +15,7 @@ import (
 
 	"github.com/km269/wukong/internal/agent"
 	"github.com/km269/wukong/internal/apps"
+	"github.com/km269/wukong/internal/ard"
 	"github.com/km269/wukong/internal/cli/tui"
 	"github.com/km269/wukong/internal/codemode"
 	"github.com/km269/wukong/internal/config"
@@ -189,6 +190,10 @@ func runSession(cmd *cobra.Command, args []string) error {
 					"error", err.Error())
 			}
 		}
+		// Shutdown ARD registry server if running
+		if bootstrapState.ARDRegistry != nil {
+			_ = bootstrapState.ARDRegistry.Shutdown(shutdownCtx)
+		}
 		// Shutdown knowledge manager
 		if bootstrapState.KnowledgeMgr != nil {
 			if err := bootstrapState.KnowledgeMgr.Close(); err != nil {
@@ -228,6 +233,10 @@ func runSession(cmd *cobra.Command, args []string) error {
 					"error", err.Error())
 			}
 		}
+		// Shutdown ARD registry server if running
+		if bootstrapState.ARDRegistry != nil {
+			_ = bootstrapState.ARDRegistry.Shutdown(shutdownCtx)
+		}
 		if bootstrapState.KnowledgeMgr != nil {
 			if err := bootstrapState.KnowledgeMgr.Close(); err != nil {
 				util.Logger.Warn("knowledge manager close error",
@@ -254,12 +263,13 @@ func runSession(cmd *cobra.Command, args []string) error {
 // BootstrapState holds resources created during bootstrap that need
 // cleanup beyond the agent loop's scope (e.g., A2A server, AG-UI server).
 type BootstrapState struct {
-	A2AServer    *summon.A2AServer
-	AGUIServer   *server.AGUIServer
-	ACPServer    *server.ACPServer
-	ACPMCPBridge *extension.ACPMCPBridge
-	KnowledgeMgr *knowledge.Manager
-	ProjectMgr   *project.Manager
+	A2AServer     *summon.A2AServer
+	AGUIServer    *server.AGUIServer
+	ACPServer     *server.ACPServer
+	ACPMCPBridge  *extension.ACPMCPBridge
+	ARDRegistry   *ard.RegistryServer
+	KnowledgeMgr  *knowledge.Manager
+	ProjectMgr    *project.Manager
 }
 
 // bootstrapSession initializes all components needed for a session.
@@ -403,6 +413,46 @@ func bootstrapSession(
 		extMgr.SetMemoryService(
 			memoryMgr.Service(), "wukong-app", userID,
 		)
+	}
+
+	// If ARD is enabled, initialize the ARD ToolSet and wire
+	// auto-discovery for MCP servers and A2A remote agents.
+	// Also optionally start Wukong's own ARD registry server so
+	// other ARD-compatible agents can discover Wukong on the network.
+	var ardRegistryServer *ard.RegistryServer
+	if wukongCfg.ARD.Enabled {
+		ardTS, ardErr := ard.NewToolSet(
+			wukongCfg.ARD.RegistryURL,
+			wukongCfg.ARD.CatalogPath,
+		)
+		if ardErr != nil {
+			util.Logger.Warn("ard: failed to create toolset",
+				"error", ardErr.Error())
+		} else {
+			// Wire ARD to extension manager for MCP auto-registration.
+			extMgr.SetARDToolSet(ardTS)
+
+			// Auto-register A2A remote agents to ARD catalog.
+			for _, remote := range wukongCfg.Summon.A2ARemotes {
+				ard.RegisterA2AAgent(ardTS, remote.Name,
+					remote.Description, remote.ServerURL)
+			}
+		}
+
+		// Start Wukong's own ARD registry server for inbound discovery.
+		if wukongCfg.ARD.PublishEnabled && wukongCfg.ARD.PublishPort > 0 {
+			ardSrv, pubErr := ard.PublishAndServe(
+				context.Background(),
+				wukongCfg.ARD.PublishPort,
+				wukongCfg.ARD.CatalogPath,
+			)
+			if pubErr != nil {
+				util.Logger.Warn("ard: failed to start registry server",
+					"error", pubErr.Error())
+			} else {
+				ardRegistryServer = ardSrv
+			}
+		}
 	}
 
 	// Register Extension Manager tool set
@@ -988,8 +1038,9 @@ func bootstrapSession(
 	}
 
 	state := &BootstrapState{
-		KnowledgeMgr: knowledgeMgr,
-		ProjectMgr:   projectMgr,
+		KnowledgeMgr:  knowledgeMgr,
+		ProjectMgr:    projectMgr,
+		ARDRegistry:   ardRegistryServer,
 	}
 	if wukongCfg.A2AServer.Enabled {
 		hostAddr := wukongCfg.A2AServer.Address

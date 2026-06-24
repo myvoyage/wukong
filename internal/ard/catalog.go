@@ -188,12 +188,16 @@ func (cm *CatalogManager) Search(query string) []CatalogEntry {
 
 // WukongBuiltInEntries returns the built-in entries for Wukong.
 func WukongBuiltInEntries() []CatalogEntry {
+	// Use descriptive URLs pointing to Wukong's internal endpoints.
+	// MCP servers are exposed via the ACP MCP bridge (default :3400).
+	// A2A agents are exposed via the A2A server (default :9090).
 	return []CatalogEntry{
-		// Server entries
+		// Server entries (MCP protocol)
 		{
 			Identifier:   WukongURNs.AppsServer.String(),
 			DisplayName:  "Wukong Apps Manager",
 			Type:         MediaTypeMCPServerCard,
+			URL:          "http://localhost:3400/mcp",
 			Description:  "HTML application lifecycle platform with create, edit, clone, pack, preview, and export capabilities.",
 			Tags:         []string{"html", "apps", "ui", "mcp-apps"},
 			Capabilities: []string{"app_create", "app_clone", "app_pack", "app_preview", "app_export"},
@@ -209,6 +213,7 @@ func WukongBuiltInEntries() []CatalogEntry {
 			Identifier:   WukongURNs.DeveloperServer.String(),
 			DisplayName:  "Developer Tools",
 			Type:         MediaTypeMCPServerCard,
+			URL:          "http://localhost:3400/mcp",
 			Description:  "File system operations, command execution, and development utilities.",
 			Tags:         []string{"developer", "filesystem", "shell"},
 			Capabilities: []string{"read_file", "write_file", "list_dir", "run_command"},
@@ -224,6 +229,7 @@ func WukongBuiltInEntries() []CatalogEntry {
 			Identifier:   WukongURNs.BrowserServer.String(),
 			DisplayName:  "Browser Controller",
 			Type:         MediaTypeMCPServerCard,
+			URL:          "http://localhost:3400/mcp",
 			Description:  "Headless browser automation via Chrome DevTools Protocol.",
 			Tags:         []string{"browser", "automation", "chromedp"},
 			Capabilities: []string{"browser_navigate", "browser_screenshot", "browser_click"},
@@ -239,6 +245,7 @@ func WukongBuiltInEntries() []CatalogEntry {
 			Identifier:   WukongURNs.MemoryServer.String(),
 			DisplayName:  "Memory Service",
 			Type:         MediaTypeMCPServerCard,
+			URL:          "http://localhost:3400/mcp",
 			Description:  "Long-term memory storage and retrieval with CortexDB.",
 			Tags:         []string{"memory", "knowledge", "vector"},
 			Capabilities: []string{"memory_add", "memory_search", "memory_recall"},
@@ -250,11 +257,12 @@ func WukongBuiltInEntries() []CatalogEntry {
 			Version:   "1.0.0",
 			UpdatedAt: Now(),
 		},
-		// Agent entries
+		// Agent entries (A2A protocol)
 		{
 			Identifier:   WukongURNs.CortexAgent.String(),
 			DisplayName:  "Cortex Knowledge Graph",
 			Type:         MediaTypeA2AAgentCard,
+			URL:          "http://localhost:9090",
 			Description:  "Knowledge graph and vector search agent powered by CortexDB.",
 			Tags:         []string{"knowledge", "graph", "vector", "rag"},
 			Capabilities: []string{"kg_query", "vector_search", "entity_extract"},
@@ -270,6 +278,7 @@ func WukongBuiltInEntries() []CatalogEntry {
 			Identifier:   WukongURNs.EvolutionAgent.String(),
 			DisplayName:  "Skill Evolution Engine",
 			Type:         MediaTypeA2AAgentCard,
+			URL:          "http://localhost:9090",
 			Description:  "Self-improving skill system with LLM-driven analysis and patching.",
 			Tags:         []string{"evolution", "skills", "improvement"},
 			Capabilities: []string{"skill_analyze", "skill_patch", "skill_evolve"},

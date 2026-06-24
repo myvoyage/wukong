@@ -1,31 +1,8 @@
 # Wukong 系统架构深度分析
 
-> **版本**: v0.9.0 | **Go**: 1.26 | **文件**: 174+ `.go` | **包**: 28+ | **依赖**: 32+
+> **版本**: v0.1.13 | **Go**: 1.26 | **文件**: 175 `.go` (42 `_test.go`) | **包**: 28 | **依赖**: 27 直接 + 106 间接
 >
 > 基于 [tRPC-Agent-Go v1.10.0](https://github.com/trpc-group/trpc-agent-go) · [tRPC-MCP-Go v0.0.16](https://github.com/trpc-group/trpc-mcp-go) · [tRPC-A2A-Go v0.2.5](https://github.com/trpc-group/trpc-a2a-go) · [CortexDB v2.25.0](https://github.com/liliang-cn/cortexdb)
-
----
-
-## 目录
-
-1. [架构哲学](#1-架构哲学)
-2. [系统全景图](#2-系统全景图)
-3. [CoreLoop 中央编排引擎](#3-coreloop-中央编排引擎)
-4. [多 Agent 编排系统](#4-多-agent-编排系统)
-5. [Recipe 子 Agent 系统](#5-recipe-子-agent-系统)
-6. [双引擎记忆系统](#6-双引擎记忆系统)
-7. [扩展与工具系统](#7-扩展与工具系统)
-8. [安全纵深防御体系](#8-安全纵深防御体系)
-9. [LLM Provider 体系](#9-llm-provider-体系)
-10. [技能自进化系统](#10-技能自进化系统)
-11. [子代理委派与技能系统](#11-子代理委派与技能系统)
-12. [配置系统](#12-配置系统)
-13. [服务与协议层](#13-服务与协议层)
-14. [存储架构](#14-存储架构)
-15. [应用管理与辅助模块](#15-应用管理与辅助模块)
-16. [关键设计决策 (ADR)](#16-关键设计决策adr)
-17. [技术选型](#17-技术选型)
-18. [模块依赖关系图](#18-模块依赖关系图)
 
 ---
 
@@ -39,7 +16,7 @@ Wukong 遵循五大核心哲学，决定所有工程决策：
 | **框架组装** | 任何组件都应可替换 | CoreLoop 依赖注入，12 子系统接口隔离 |
 | **多 Agent 原生** | 编排是第一公民 | 10 种显式编排模式 + HITL 人机协同 |
 | **进化智能** | 技能应从失败中学习 | LLM 分析 → 自动补丁 → 版本管理 → 热重载 |
-| **纵深防御** | 安全是多层协同 | 5 层防御：Guard → goja JS沙箱 → OS沙箱 → .wukongignore → OS权限 |
+| **双向发现** | 发现别人，也被人发现 | ARD: 联邦搜索 + RegistryServer 发布 |
 
 ---
 
@@ -51,37 +28,34 @@ Wukong 遵循五大核心哲学，决定所有工程决策：
 ├──────────────────────────────────────────────────────────────────────┤
 │ Entry Points: CLI (cobra+TUI) │ A2A :9090 │ ACP :9091 │ AG-UI :8080  │
 ├──────────────────────────────────────────────────────────────────────┤
-│ Core Engine: CoreLoop — 中央编排器 (12 子系统)                         │
+│ Core Engine: CoreLoop (1560行) — 中央编排器, 12 子系统                  │
 │   WorkflowBuilder(10模式) · TeamBuilder · ContextManager(3层压缩)     │
-│   Security Guard(5层) · HITL(中断-恢复) · TodoEnforcer(强制完成)      │
+│   Security Guard(5层防御) · HITL · TodoEnforcer                         │
 ├──────────────────────────────────────────────────────────────────────┤
 │ Agent Framework: tRPC-Agent-Go v1.10.0                                │
 │   LLMAgent / ChainAgent / ParallelAgent / CycleAgent / GraphAgent      │
 │   Planner / ToolSearch / ContextCompaction / Skill / Recipe            │
-│   Session / Memory / Artifact / Telemetry Service                      │
-│   6 Callbacks: BeforeModel / AfterModel / AfterTool / CodeExecution    │
+│   6 Callbacks + Session/Memory/Artifact Service                        │
 ├──────────────────────────────────────────────────────────────────────┤
 │ Memory Stack (双引擎三层):                                              │
-│ ┌─ 短期: MemoryFlow ──────────────────────────────────────────────┐   │
-│ │  IngestTurn(转录) → WakeUp(语义唤醒, 3层上下文) → PromoteFacts   │   │
-│ ├─ 中期: CortexStore ─────────────────────────────────────────────┤   │
-│ │  HNSW向量搜索 + FTS5全文搜索 + 本地余弦相似度排序                 │   │
-│ ├─ 长期: tRPC Memory ─────────────────────────────────────────────┤   │
-│ │  AutoExtract(异步LLM提取) + SmartCleanup(70%新鲜度+30%长度)      │   │
-│ └─ 结构化: GraphFlow ──────────────────────────────────────────────┘   │
-│    auto_extract(每轮对话) → RDF知识图谱 → SPARQL查询                    │
+│   短期: MemoryFlow — IngestTurn → WakeUp(3层) → PromoteFacts           │
+│   中期: CortexStore — HNSW向量 + FTS5全文 + 余弦相似度                   │
+│   长期: tRPC Memory — AutoExtract + SmartCleanup(70%+30%)              │
+│   结构化: GraphFlow — auto_extract → RDF → SPARQL                      │
 ├──────────────────────────────────────────────────────────────────────┤
-│ Capability: Recipe(14功能) · 11内置扩展 · Evolution · Summon           │
-│   CodeMode(goja JS) · Browser(Chromedp) · Knowledge(RAG) · ARD         │
-│   Apps(Clone/Pack/Sanitize/Server/History) · ZIM库 · OS沙箱            │
+│ Capability Layer:                                                       │
+│   Recipe(14功能) · 12内置扩展 · ARD(双向发现+7工具)                      │
+│   Evolution · Summon(A2A委派) · CodeMode(goja JS)                     │
+│   Browser(Chromedp) · Knowledge(RAG) · Apps(5子目录)                   │
+│   pkg/sandbox(跨平台OS隔离) · pkg/zim(ZIM格式)                           │
 ├──────────────────────────────────────────────────────────────────────┤
-│ Infrastructure: 7 LLM backends · OpenTelemetry · Langfuse              │
-│   MultiPool(SQLite WAL) · fsnotify · text/template · golang.org/x/net  │
+│ Infrastructure:                                                         │
+│   7 LLM backends · OpenTelemetry · Langfuse                            │
+│   MultiPool(SQLite WAL) · fsnotify · text/template                     │
 ├──────────────────────────────────────────────────────────────────────┤
 │ Storage: wukong.db (单文件, shared MultiPool)                           │
 │   sessions / memories / recall(FTS5) / todos / projects                │
-│   cortex(episodes/entities/relations/HNSW/FTS5/vectors)                │
-│   apps_versions / skill_versions / evolution_records                   │
+│   cortex_* / apps_history / evolution_* / FTS5 / HNSW / vectors        │
 └──────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -89,633 +63,829 @@ Wukong 遵循五大核心哲学，决定所有工程决策：
 
 ## 3. CoreLoop 中央编排引擎
 
-`CoreLoop` (`internal/agent/loop.go`, 1560行) 是系统中央编排器：
+`internal/agent/loop.go` (1560 行, 13 源文件 + 8 测试文件)
 
-### 3.1 结构定义
+CoreLoop 是 Wukong 的中央编排引擎，类似 Goose 的交互式工具调用循环，建立在 tRPC-Agent-Go 的 Runner 和 LLMAgent 之上。
+
+### 3.1 结构体定义
 
 ```go
 type CoreLoop struct {
-    agent          agent.Agent           // tRPC Agent实例
-    runner         runner.Runner         // tRPC Runner
-    sessionService session.Service       // 会话管理
-    memoryService  memory.Service        // 持久记忆
-    factory        *provider.Factory     // LLM工厂
-    cfg            *config.WukongConfig  // 完整配置
-    contextMgr     *ContextManager       // 上下文压缩
-    security       *security.Guard       // 安全守卫
-    recallStore    *recall.Store         // FTS5搜索
-    cortexStore    *cortex.CortexStore   // HNSW向量
-    memoryFlow     *cortex.MemoryFlowService  // 转录回溯
-    graphFlow      *cortex.GraphFlowService   // 知识图谱
-    closeFn        func() error          // 组合关闭
-    mu sync.RWMutex; closed bool; bgWg sync.WaitGroup
+    agent          agent.Agent          // tRPC Agent 实例
+    runner         runner.Runner        // tRPC Runner 执行器
+    sessionService session.Service      // 会话持久化
+    memoryService  memory.Service       // 长期记忆服务
+    factory        *provider.Factory    // LLM Provider 工厂
+    cfg            *config.WukongConfig // 全局配置
+    contextMgr     *ContextManager      // 上下文管理（3层压缩）
+    security       *security.Guard      // 安全守卫（5层防御）
+    recallStore    *recall.Store        // FTS5 全文搜索召回
+    cortexStore    *cortex.CortexStore  // HNSW 向量检索（可选）
+    memoryFlow     *cortex.MemoryFlowService  // 转录+唤醒
+    graphFlow      *cortex.GraphFlowService  // KG 自动提取
+    closeFn        func() error         // 关闭回调链
+    mu     sync.RWMutex
+    closed bool
+    bgWg   sync.WaitGroup               // 后台 goroutine 追踪
 }
 ```
 
-### 3.2 初始化流程 (NewCoreLoop, 8步)
+### 3.2 依赖注入配置
 
-```
-1. 收集 FunctionTools (文件读写、命令执行等)
-2. 加载 YAML Recipe 子Agent工具集 (5阶段流水线)
-3. 添加 tRPC Todo 工具 (todo_write)
-4. 选择 Agent 模式:
-   ├── 非single → WorkflowBuilder.Build()
-   └── single → createSingleAgent()
-       ├── PromptTemplate → buildSystemInstruction()
-       ├── TopOfMind 持久化指令注入
-       ├── 记忆预加载 (ReadMemories + 30字符滑动窗口去重)
-       ├── ToolSets (扩展+内置+Recipe+Todo)
-       ├── Planner (builtin/react)
-       └── 6 Callbacks (BeforeModel/AfterModel/AfterTool等)
-5. 创建 Runner (注入Session/Memory/Artifact服务)
-6. 配置插件: ToolSearch + PromptInjection + TodoEnforcer + ContextCompaction
-7. 创建 ContextManager + ContextRevisionEngine
-8. 组装分层 closeFn (6步严格顺序)
-```
-
-### 3.3 执行循环 (4阶段)
-
-```
-Phase 1: 对话前准备 (上下文注入)
-  ├── ContextManager.PrepareContext()    → 上下文压缩
-  ├── recallStore.StoreMessage(user)     → [FTS5+HNSW]
-  ├── cortexStore.StoreMessage(user)     → [HNSW向量]
-  ├── memoryFlow.IngestTurn(user)        → [CortexDB Episode]
-  ├── memoryFlow.WakeUp()                → [3层语义唤醒]
-  ├── memoryService.ReadMemories()       → [持久记忆+去重]
-  └── graphFlow.BuildContext()           → [KG增强上下文]
-
-Phase 2: Agent 执行
-  └── runner.Run()
-      ├── LLM推理 (主模型)
-      ├── Tool Calls → Guard.Check() → 执行
-      ├── AutoExtract (异步, 轻量模型)
-      └── SummaryJob (异步, 上下文摘要)
-
-Phase 3: 对话后收尾
-  ├── recallStore.StoreMessage(*) / cortexStore.StoreMessage(*)
-  ├── memoryFlow.IngestTurn(assistant) → PromoteFacts → tRPC Memory
-  ├── graphFlow auto_extract → RDF实体/关系
-  └── contextMgr.AfterRun() → token统计
-
-Phase 4: 返回响应
-  └── contextMgr.AfterRun() → token统计更新
+```go
+type CoreLoopConfig struct {
+    Config               *config.WukongConfig
+    Factory              *provider.Factory
+    SessionService       session.Service
+    MemoryService        memory.Service
+    ArtifactService      artifact.Service
+    ToolSets             []tool.ToolSet
+    FunctionTools        []tool.Tool
+    SecurityGuard        *security.Guard
+    RecallStore          *recall.Store
+    CortexStore          *cortex.CortexStore
+    RevisionModel        RevisionModel
+    MemoryFlowService    *cortex.MemoryFlowService
+    GraphFlowService     *cortex.GraphFlowService
+    TopOfMindInstructions string
+    TelemetryShutdown    func(context.Context) error
+    MemoryClose          func() error
+}
 ```
 
-### 3.4 上下文压缩引擎 (ContextManager, 3层)
-
-| 层 | 机制 | 说明 |
-|----|------|------|
-| Layer 1 | tRPC ContextCompaction 插件 | Pass1:旧工具结果→占位符; Pass2:头尾截断 |
-| Layer 2 | ContextRevisionEngine LLM摘要 | 辅助模型生成结构化摘要, 冷却期120s |
-| Layer 3 | 渐进式截断 | Revision配置: max_context_tokens 64000, trim_ratio 0.3 |
-
-### 3.5 关闭序列 (6步严格顺序)
+### 3.3 初始化序列（8 步）
 
 ```
-1. bgWg.Wait()                → 等待后台goroutine
-2. runner.Close()             → 停止Agent Runner
-3. evolution.Close()          → 停止进化引擎
-4. memory.Close() (5s超时)    → 停止AutoExtract
-5. session.Close() + graphFlow.Close()
-6. telemetry.Shutdown(10s) + dbPool.Close() → WAL checkpoint
+1. 收集 FunctionTools
+   → 2. 加载 Recipe YAML 文件
+   → 3. 添加 Todo 工具（如启用）
+   → 4. 选择编排模式（single→LLMAgent / 其他→WorkflowBuilder）
+   → 5. 创建 Runner（含 session/memory/artifact service）
+   → 6. 配置插件（ToolSearch/TodoEnforcer/ContextCompaction）
+   → 7. 初始化 ContextManager + RevisionEngine
+   → 8. 组装 closeFn 关闭回调链
+```
+
+### 3.4 执行循环（4 阶段）
+
+```
+Phase 1: Prepare (准备阶段)
+  ├── ContextManager.Prepare()        — 上下文压缩/裁剪
+  ├── Recall/Cortex 存储检索          — 相关历史消息
+  ├── MemoryFlow.WakeUp()             — 3层唤醒（身份/回忆/当前会话）
+  ├── tRPC Memory.ReadMemories()     — 长期记忆去重
+  └── GraphFlow KG 增强               — 知识图谱补充
+
+Phase 2: Execute (执行阶段)
+  ├── runner.Run()                    — LLM 推理
+  ├── Tool Calls 执行                 — 工具调用
+  └── Guard.Check()                   — 安全检查（权限/命令/注入）
+
+Phase 3: Finalize (收尾阶段)
+  ├── StoreMessage()                  — 保存本轮消息
+  ├── MemoryFlow.IngestTurn()        — 转录本轮对话
+  ├── tRPC Memory.PromoteFacts()     — 提取长期记忆
+  └── GraphFlow.auto_extract()       — 自动 KG 提取
+
+Phase 4: Return (返回阶段)
+  └── contextMgr.AfterRun()           — Token 统计与清理
+```
+
+### 3.5 优雅关闭序列（6 步）
+
+```
+bgWg.Wait() → runner.Close()
+  → evolution.Close()
+  → memory.Close(5s 超时)
+  → session.Close() + graphFlow.Close()
+  → telemetry.Shutdown(10s 超时)
+  → dbPool.Close()
 ```
 
 ---
 
 ## 4. 多 Agent 编排系统
 
-### 4.1 WorkflowBuilder (workflow.go, 637行)
+`internal/agent/workflow.go` (18.37 KB) + `internal/agent/team.go` (8.90 KB)
 
-| 模式 | 拓扑 | Agent类型 | 适用场景 |
-|------|------|-----------|----------|
-| `single` | 单Agent | LLMAgent | 日常对话(默认) |
-| `chain` | planner→executor→reviewer | ChainAgent | 多步流水线 |
-| `parallel` | 3视角并发 | ParallelAgent | 多角度分析 |
-| `cycle` | planner↔executor | CycleAgent | 自我改进 |
-| `graph` | 条件路由DAG | GraphAgent | 复杂决策 |
-| `team_coordinator` | Leader委派 | Team | 团队协作 |
-| `team_swarm` | 自动transfer | Team(Swarm) | 自主委派 |
-| `claude_code` | Claude CLI | claudecode | 本地Claude |
-| `codex` | Codex CLI | codex | 本地Codex |
-| `dify` | Dify平台 | DifyAgent | 低代码 |
+### 4.1 WorkflowMode 定义
 
-### 4.2 TeamBuilder (team.go, 301行)
-
-- **team_coordinator**: Coordinator通过AgentTool调度成员, `WithEnableParallelTools(true)`
-- **team_swarm**: 成员间`transfer_to_agent`, `WithCrossRequestTransfer(true)`
-- 默认成员: researcher(研究) + coder(编程) + reviewer(审查)
-
-### 4.3 Graph 高级特性
-
-| 特性 | 配置 | 说明 |
-|------|------|------|
-| 流式模式 | `stream_mode: hub` | 节点间流式通信 |
-| 节点缓存 | `cache_enabled: true` | 纯函数节点避免重复计算 |
-| 执行引擎 | `engine: bsp/dag` | BSP同步屏障 / DAG有向无环图 |
-
-### 4.4 HITL 人机协同 (hitl.go, 179行)
-
+```go
+const (
+    WorkflowSingle          WorkflowMode = "single"
+    WorkflowChain           WorkflowMode = "chain"
+    WorkflowParallel        WorkflowMode = "parallel"
+    WorkflowCycle           WorkflowMode = "cycle"
+    WorkflowGraph           WorkflowMode = "graph"
+    WorkflowTeamCoordinator WorkflowMode = "team_coordinator"
+    WorkflowTeamSwarm       WorkflowMode = "team_swarm"
+    WorkflowClaudeCode      WorkflowMode = "claude_code"
+    WorkflowCodex           WorkflowMode = "codex"
+    WorkflowDify            WorkflowMode = "dify"
+)
 ```
-graph.AddInterruptBefore("dangerous_op")
-  → 执行到危险节点前暂停
-  → 用户审批
-  → ResumeInterrupted → runner.Run() + agent.WithResume(true)
-  → 从checkpoint恢复继续执行
+
+### 4.2 模式详解
+
+| 模式 | 拓扑 | 底层实现 | 适用场景 |
+|------|------|----------|----------|
+| `single` | 单体 Agent | LLMAgent | 日常对话（默认） |
+| `chain` | planner→executor→reviewer | ChainAgent | 流水线处理 |
+| `parallel` | 3 视角并发 | ParallelAgent | 多角度分析 |
+| `cycle` | planner↔executor | CycleAgent | 自我改进迭代 |
+| `graph` | 条件路由 DAG | GraphAgent | 复杂决策流程 |
+| `team_coordinator` | Leader 委派 | TeamAgent | 团队协作 |
+| `team_swarm` | 自动 transfer | TeamAgent(swarm) | 自主委派 |
+| `claude_code` | 外部 CLI 进程 | exec.Cmd | 本地 Claude CLI |
+| `codex` | 外部 CLI 进程 | exec.Cmd | 本地 Codex CLI |
+| `dify` | HTTP API | HTTP Client | Dify 低代码平台 |
+
+### 4.3 WorkflowBuilder
+
+`WorkflowBuilder` 负责根据 `OrchestrationConfig` 构建对应的 tRPC Agent：
+
+```go
+type WorkflowBuilder struct {
+    factory   *provider.Factory
+    cfg       *config.WukongConfig
+    model     model.Model
+    genConfig model.GenerationConfig
+    tools     []tool.Tool
+    toolSets  []tool.ToolSet
+}
 ```
+
+### 4.4 TeamBuilder
+
+`internal/agent/team.go` 实现团队模式：
+- `team_coordinator`: Leader Agent 负责任务分解和委派
+- `team_swarm`: 子 Agent 之间通过 `transfer` 自动切换
 
 ---
 
 ## 5. Recipe 子 Agent 系统
 
-基于YAML的结构化子Agent定义系统，5文件协同实现(1878行):
+`internal/agent/recipe*.go` (5 文件, 1878 行)
 
-### 5.1 五阶段加载流水线
+### 5.1 架构概览
+
+Recipe 是一个轻量级可复用的子 Agent 定义系统，通过 YAML 文件描述 Agent 的行为、工具和提示。
+
+**5 文件协同**:
+| 文件 | 行数 | 功能 |
+|------|------|------|
+| `recipe.go` | ~650 | 核心定义、加载、模板 |
+| `recipe_compose.go` | ~450 | 组合、继承、子配方 |
+| `recipe_tool.go` | ~400 | 工具包装器 |
+| `recipe_advance.go` | ~280 | 高级特性（超时/重试/模型覆盖） |
+| `recipe_metrics.go` | ~140 | 执行统计与监控 |
+
+### 5.2 14 项功能
+
+| # | 功能 | 说明 |
+|---|------|------|
+| 1 | 参数化 | `${param}` 模板变量替换 |
+| 2 | 结构化输出 | JSON Schema 定义输出格式 |
+| 3 | 子配方 | 配方间组合与嵌套 |
+| 4 | 重试 | 指数退避自动重试（可配置次数/初始等待/退避因子） |
+| 5 | 继承 | 父配方属性继承 |
+| 6 | 内联 | 配方内容直接嵌入 |
+| 7 | 模型覆盖 | 指定特定 LLM provider/model |
+| 8 | 超时 | 执行时间限制 |
+| 9 | 热重载 | `fsnotify` 文件变更自动重载 |
+| 10 | 指标 | 调用次数/成功率/平均延迟 |
+| 11 | Agent Tool 包装 | 包装为 tRPC Agent Tool |
+| 12 | Function Tool | 直接注册为 FunctionTool |
+| 13 | Retry Tool | 带退避重试的 Tool 包装 |
+| 14 | Timeout Tool | 带超时控制的 Tool 包装 |
+
+### 5.3 工具包装器链
 
 ```
-Phase 1: 加载配置 (文件+内联) → map[name]*RecipeConfig
-Phase 2: 解析继承链 (extends) → resolveAllExtends (递归合并)
-Phase 3: 拓扑排序 → topoSortRecipes (DAG+循环检测)
-Phase 4: 按序构建 → recipeTool→retryTool→timeoutTool
-Phase 5: 注册发现/热重载/统计工具
+agenttool.NewTool(recipeTool)
+  → recipeTool(参数注入+模板渲染)
+  → retryTool(指数退避重试)
+  → timeoutTool(超时控制)
 ```
 
-### 5.2 功能矩阵 (14项)
-
-| 阶段 | 功能 | YAML字段 | 实现 |
-|------|------|----------|------|
-| P0-A | 参数化模板 | `prompt`, `parameters` | Go text/template渲染 |
-| P0-B | 结构化输出 | `response.json_schema` | WithStructuredOutputJSONSchema |
-| P1-A | 子配方组合 | `tools: [recipe-xxx]` | 拓扑排序+DAG构建 |
-| P1-B | 重试与校验 | `retry`, `validate_output` | 指数退避+JSON校验 |
-| P2-A | 内联配方 | `agent.inline_recipes` | YAML round-trip转换 |
-| P2-B | 配方继承 | `extends` | 递归继承合并 |
-| P3-A | 模型覆盖 | `model` | CreateModelWithName |
-| P3-B | 超时控制 | `timeout` | context.WithTimeout |
-| P3-C | 配方发现 | `list_recipes`工具 | JSON返回配方列表 |
-| P3-D | 热重载 | `reload_recipes`+fsnotify | 500ms防抖自动重建 |
-| P4-A | 指令模板 | `instruction: "{{.var}}"` | 与prompt共同渲染 |
-| P4-B | 执行指标 | 自动收集 | 包装器内CallCount/Success/Error |
-| P4-C | 统计工具 | `recipe_stats` | 指标查询 |
-
-### 5.3 工具包装器链 (从内到外)
+### 5.4 加载阶段（5 阶段）
 
 ```
-agenttool.NewTool → recipeTool(参数+模板+指标)
-  → retryTool(指数退避重试+输出校验)
-    → timeoutTool(context.WithTimeout)
+1. 文件发现    — 扫描 recipe_dir 下的 YAML 文件
+2. 解析验证    — YAML → Recipe 结构体 + Schema 验证
+3. 模板编译    — text/template 编译提示模板
+4. 依赖解析    — 继承链 + 子配方引用展开
+5. 工具注册    — 生成工具并注册到 Agent
 ```
 
 ---
 
 ## 6. 双引擎记忆系统
 
-### 6.1 引擎一: tRPC Memory (SQLite KV, memory/store.go)
+### 6.1 架构总览
 
-| 功能 | 实现 |
-|------|------|
-| MemoryManager | 包装tRPC memory.Service, 优雅关闭 |
-| trackingMemoryService | 装饰器, 追踪活跃提取作业 |
-| noCloseDBWrapper | 防止Close()关闭共享DB |
-| AutoExtract | 每轮对话后异步LLM(轻量模型)提取事实 |
-| SmartCleanup | ≥80%容量触发评分淘汰→60%, 评分: 70%新鲜度+30%内容长度 |
+```
+┌─────────────────────────────────────────────────────────────┐
+│                     Wukong Memory Stack                      │
+├─────────────┬────────────────┬───────────┬──────────────────┤
+│   短期记忆   │   中期记忆       │  长期记忆  │  结构化记忆       │
+│ MemoryFlow   │ CortexStore     │ tRPC Memory│ GraphFlow        │
+├─────────────┼────────────────┼───────────┼──────────────────┤
+│ IngestTurn   │ HNSW Vector     │ AutoExtract│ auto_extract     │
+│ (转录记录)    │ (向量索引)       │ (异步LLM)  │ (每轮对话)        │
+│ WakeUp       │ FTS5 Full-Text  │ SmartCleanup│ RDF Triple       │
+│ (3层唤醒)     │ (全文搜索)       │ (容量淘汰)  │ (实体关系)        │
+│ PromoteFacts  │ Cosine Similarity│ ReadMemories│ SPARQL           │
+│ (事实提升)     │ (余弦相似度)      │ (去重查询)  │ (图谱查询)        │
+└─────────────┴────────────────┴───────────┴──────────────────┘
+```
 
-**6个工具**: memory_add/search/update/delete/load/clear
+### 6.2 短期记忆：MemoryFlow
 
-### 6.2 引擎二: CortexDB Stack (12文件)
+**功能**: 转录本轮对话 → 生成唤醒上下文 → 将重要事实提升为长期记忆
 
-#### CortexStore (store.go, 281行)
-HNSW向量搜索+FTS5全文搜索。双写策略: FTS5(权威源)→HNSW向量(有embedder时)。搜索: HNSW优先→失败回退FTS5。
+**3 层唤醒上下文**:
+1. **身份层** — Agent 的持久身份和角色定义
+2. **回忆层** — 从历史记忆中检索的相关信息
+3. **当前会话层** — 最近的对话上下文
 
-#### lexicalStore (lexical.go, 587行)
-SQLite FTS5词法搜索+向量索引。本地余弦相似度: 取最近200条向量→排序→top-K→不足时FTS5补充。
-Schema: `chat_recall` + `chat_recall_fts`(FTS5) + `chat_recall_vec`(向量) + 3个触发器(AFTER INSERT/DELETE/UPDATE)
+### 6.3 中期记忆：CortexStore
 
-#### MemoryFlow (memoryflow.go, 256行)
-- IngestTurn() → CortexDB Episode
-- WakeUp() → 3层上下文(身份/回忆/会话)
-- PromoteFacts() → LLM提取→桥接tRPC Memory
+`internal/cortex/store.go`
 
-#### GraphFlow (graphflow.go, 255行)
-- auto_extract: 每轮对话后自动执行
-- 流程: BuildTranscript→ExtractEntities→BuildGraph(RDF)
-- 支持SPARQL查询
+**双索引架构**:
+- **HNSW 向量索引**: 当 embedding 配置时，使用 CortexDB 的 HNSW 进行语义搜索
+- **FTS5 全文索引**: 始终可用，通过共享 SQLite 连接避免事务冲突
 
-#### 辅助组件
+```go
+type CortexStore struct {
+    cfg      *config.CortexConfig
+    embedder *Embedder
+    db       *cortexdb.DB      // 真实 CortexDB (HNSW + FTS5)
+    lexical  *lexicalStore     // FTS5 词法存储
+}
+```
 
-| 文件 | 功能 | 行数 |
-|------|------|------|
-| extractor.go | LLM+启发式双重提取(3层回退) | 439 |
-| embedder.go | OpenAI兼容文本向量客户端 | 138 |
-| planner.go | LLM检索策略规划器 | 221 |
-| json_generator.go | 实体/关系JSON生成 | 101 |
-| recall_manager.go | 跨系统搜索工具管理器 | 155 |
-| import_flow.go | ImportFlow服务 | 134 |
-| import_tools.go | DDL/CSV导入工具 | 267 |
-| kg_tools.go | 知识图谱查询/分析工具 | 162 |
+**降级策略**: 无 embedder → 回退到 FTS5 全文搜索
 
-### 6.3 记忆去重机制
+### 6.4 长期记忆：tRPC Memory
 
-`isMemoryDuplicated()`: 30字符滑动窗口, ≥60%重叠视为重复, 避免上下文冗余注入。
+`internal/memory/store.go`
+
+**核心机制**:
+- **AutoExtract**: 异步 LLM 提取关键事实（使用 `lightweight_model`）
+- **SmartCleanup**: 容量达到 80% 触发 → 清理至 60% → 按 70% 新鲜度 + 30% 长度排序淘汰
+- **ReadMemories**: 每轮对话自动检索去重后的相关记忆
+
+### 6.5 结构化记忆：GraphFlow
+
+`internal/cortex/graphflow.go`
+
+**核心机制**:
+- `auto_extract`: 每轮对话结束自动提取实体和关系
+- RDF 三元组存储
+- SPARQL 查询支持
+- `max_chars_per_doc: 8000` 限制文档长度
 
 ---
 
 ## 7. 扩展与工具系统
 
-### 7.1 ExtensionManager (extension/manager.go)
+### 7.1 Extension Manager
 
-- 动态注册: Deeplink URL或YAML配置
-- 状态机: loading→enabled/disabled/error
-- 环境变量注入: `${VAR}`自动展开
-- 内存服务注入: 接口断言避免循环依赖
+`internal/extension/manager.go` (13.28 KB)
 
-### 7.2 MCP Client (extension/mcp_client.go)
+```go
+type Manager struct {
+    mu       sync.RWMutex
+    toolSets map[string]tool.ToolSet
+    status   map[string]ExtensionInfo
+    cfg      *config.WukongConfig
+    ardTS    *ard.ToolSet  // 可选 ARD 自动发现集成
+}
+```
 
-| 传输模式 | 说明 |
-|----------|------|
-| stdio | 命令行子进程, 支持include/exclude glob过滤 |
-| SSE | HTTP SSE流, 会话重连支持 |
-| Streamable HTTP | Streamable HTTP, 环境变量覆盖 |
+**核心功能**:
+- 动态启用/禁用扩展
+- 细粒度工具权限控制（allowlist/denylist）
+- MCP Broker 集成（批量管理外部 MCP Server）
+- ARD 自动注册（MCP 连接 → 自动注册到 ARD 目录）
+- DeepLink 机制（扩展间引用）
 
-### 7.3 ACP MCP Bridge (extension/acp_mcp.go)
+### 7.2 12 内置扩展
 
-- JSON-RPC 2.0 over HTTP, `:3400/mcp`
-- 支持 `tools/list`, `tools/call`, `initialize`
-- 请求体限制 10MB (DoS防护)
+| 扩展名 | 源文件 | 工具数 | 启用条件 | 功能描述 |
+|--------|--------|--------|----------|----------|
+| `developer` | `developer.go` | 多 | 始终 | 文件读写、命令执行、Shell 交互 |
+| `computer_controller` | `computer_controller.go` | 多 | `browser.enabled` | Chromedp 浏览器导航/截图/点击/输入 |
+| `memory` | `memory.go` | 6 | 始终 | search/add/update/delete/list/clear 记忆 |
+| `auto_visualiser` | `auto_visualiser.go` | 多 | `visualiser.enabled` | 自动图表/流程图/思维导图生成 |
+| `tutorial` | `tutorial.go` | 多 | `tutorial.enabled` | 交互式教程，支持中英文 |
+| `top_of_mind` | `topofmind.go` | 0 | `top_of_mind.enabled` | 持久指令注入系统提示 |
+| `code_mode` | `codemode.go` | 多 | `code_mode.enabled` | goja JavaScript 沙箱执行 |
+| `apps` | `apps.go` | 多 | `apps.enabled` | HTML 应用克隆/打包/清理/服务 |
+| `web` | `web.go` | 多 | 始终 | Web 搜索和抓取 |
+| `agent_tools` | `agent.go` | 多 | 始终 | Recipe 子 Agent 工具包装 |
+| `ard` | `ard.go` | 7 | `ard.enabled` | ARD 资源发现工具 |
+| `cortex` | `cortex.go` | 多 | `cortex.enabled` | CortexDB 知识图谱操作 |
 
-### 7.4 12 个内置扩展
+### 7.3 ARD 7 工具
 
-| 扩展名 | 功能 | 注册状态 |
-|--------|------|----------|
-| `developer` | 文件读写、命令执行 | ✅ 始终启用 |
-| `computer_controller` | Chromedp浏览器自动化 | ✅ browser.enabled联动 |
-| `memory` | 记忆管理(6 tools) | ✅ 始终启用 |
-| `auto_visualiser` | 自动可视化 | ✅ visualiser.enabled联动 |
-| `tutorial` | 交互式教程 | ✅ tutorial.enabled联动 |
-| `top_of_mind` | 持久指令注入 | ✅ top_of_mind.enabled联动 |
-| `code_mode` | goja JS沙箱 | ✅ code_mode.enabled联动 |
-| `apps` | HTML应用管理 | ✅ apps.enabled联动 |
-| `web` | Web工具 | ✅ 始终启用 |
-| `agent_tools` | 子Agent包装 | ✅ 始终启用 |
-| `ard` | ARD资源发现 | ✅ ard.enabled联动 |
-| `cortex` | CortexDB知识图谱 | ✅ cortex.enabled联动 |
+`internal/ard/tools.go`
+
+| 工具 | 功能 | 方向 |
+|------|------|------|
+| `ard_search` | 语义搜索远程资源 | Outbound |
+| `ard_discover` | 联邦发现多个 Registry | Outbound |
+| `ard_list` | 列出本地目录资源 | 本地 |
+| `ard_get` | 获取资源详情 | 本地 |
+| `ard_register` | 注册新资源 | Inbound/本地 |
+| `ard_unregister` | 注销资源 | Inbound/本地 |
+| `ard_export` | 导出目录 | Outbound |
+
+### 7.4 ARD 双向发现架构
+
+```
+Outbound (发现别人):
+  ToolSet.Search() → HTTP Client → 远程 Registry → FederatedSearch
+  → 语义搜索 → URN 解析 → Agent/Server/MCP Server
+
+Inbound (被人发现):
+  RegistryServer(:8081) → /.well-known/ai-catalog.json
+  → 其他 ARD Agent 可发现 Wukong
+
+Auto (自动注册):
+  MCP 连接建立 → buildARDEntry → ardTS.Register
+  A2A Remote 配置 → RegisterA2AAgent → ardTS.Register
+```
 
 ---
 
-## 8. 安全纵深防御体系
+## 8. 安全纵深防御
 
-### 8.1 5层防御模型
+`internal/security/guard.go` (12.83 KB) + `ignore.go` (7.42 KB)
+
+### 8.1 五层架构
 
 ```
-Layer 5: Guard      → auto/smart/manual/chat_only + 命令拦截 + Prompt注入检测
-Layer 4: goja JS    → API白名单 + 128MB + 5并发 + ReDoS防护 + 1MB输入限制
-Layer 3: OS沙箱     → Landlock(linux) / sandbox-exec(macOS) / Low IL(Windows)
-Layer 2: .wukongignore → gitignore兼容文件访问黑名单
-Layer 1: OS权限     → 非root + ulimit
+Layer 5: Guard 执行防护
+  • 4 种模式: auto（自动批准）/ smart（智能判断）/ manual（手动确认）/ chat_only（仅对话）
+  • 危险命令拦截: rm -rf /, dd if=/dev/zero, mkfs, fork bomb
+  • Prompt 注入检测（tRPC guardrail 插件）
+  • 细粒度工具 allowlist/denylist
+  • 执行超时控制（default 30s / max 300s）
+
+Layer 4: goja JavaScript 沙箱
+  • API 白名单（仅允许安全内置函数）
+  • 128MB 内存限制
+  • 5 并发 goroutine 限制
+  • ReDoS 正则表达式攻击防护
+  • 源代码最大 1MB 限制
+
+Layer 3: OS 级文件沙箱（pkg/sandbox）
+  • Linux: Landlock（内核 5.13+ 内建）
+  • macOS: sandbox-exec(1)（系统内建）
+  • Windows: Low Integrity Level + Mandatory Labels
+  • 仅允许写入指定目录，其余只读
+  • 无 Docker、无守护进程、无额外安装
+
+Layer 2: .wukongignore 文件黑名单
+  • gitignore 兼容语法
+  • 阻止 Agent 访问 .env / .git / secrets 等敏感文件
+
+Layer 1: OS 级别权限
+  • 建议非 root 用户运行
+  • ulimit 资源限制
 ```
 
-### 8.2 Guard (security/guard.go)
+### 8.2 Guard 结构体
 
-4种权限模式: `auto`(全自动) / `smart`(智能决策,默认) / `manual`(全部审批) / `chat_only`(纯文本)
+```go
+type Guard struct {
+    mu              sync.RWMutex
+    cfg             *config.SecurityConfig
+    approvedCommands map[string]bool  // 用户已批准的临时白名单
+    blockedCount    int
+    ignoreMatcher   *IgnoreMatcher    // .wukongignore 匹配器
+}
+```
 
-### 8.3 goja JS沙箱 (codemode/executor.go)
+### 8.3 权限模式比较
 
-| 措施 | 实现 |
-|------|------|
-| API白名单 | console/JSON/Math/__output |
-| 显式禁用 | eval/Function/setInterval/Date/RegExp |
-| 内存限制 | debug.SetMemoryLimit(128MB, 配置值80%) |
-| 超时控制 | context.WithTimeout(10s)+VM中断 |
-| 并发控制 | channel semaphore (max 5) |
-| JSON保护 | JSON.parse 1MB输入限制 |
-
-### 8.4 OS级沙箱 (pkg/sandbox/)
-
-与`os/exec`完全兼容的API。跨平台: Linux(Landlock LSM, kernel 5.13+), macOS(sandbox-exec+Seatbelt), Windows(Low Integrity Level), 其他(WARN日志)。
+| 模式 | 自动执行 | 需确认操作 | 禁止操作 |
+|------|----------|-----------|----------|
+| `auto` | 读文件/搜索 | 危险命令 | blocked_commands |
+| `smart` | 读文件/搜索/工作目录写入 | 修改外部文件/安装软件 | blocked_commands |
+| `manual` | 无 | 所有工具调用 | blocked_commands |
+| `chat_only` | 无 | 无（无工具执行） | 所有命令 |
 
 ---
 
 ## 9. LLM Provider 体系
 
-### 9.1 Factory (provider/factory.go)
+`internal/provider/factory.go` (8.54 KB) + `acp.go` (6.52 KB)
 
-| Provider | type | 基础URL | SDK |
-|----------|------|---------|-----|
-| OpenAI | `openai` | api.openai.com | openai-go |
-| Anthropic | `anthropic` | api.anthropic.com | openai-go(兼容) |
-| Google | `google` | 自动 | openai-go(Gemini) |
-| DeepSeek | `deepseek` | api.deepseek.com | openai-go |
-| Ollama | `ollama` | localhost:11434 | openai-go |
-| LMStudio | `lmstudio` | localhost:1234 | openai-go |
-| ACP | `acp` | agent_url | HTTP client |
+### 9.1 Provider 注册表
 
-### 9.2 模型分工
+| Provider | 配置类型 | SDK | 特点 |
+|----------|----------|-----|------|
+| OpenAI | `openai` | openai-go | GPT-4o/GPT-4 系列 |
+| Anthropic | `anthropic` | openai-go (兼容) | Claude Sonnet 4 系列 |
+| Google | `google` | openai-go (兼容) | Gemini 系列 |
+| DeepSeek | `deepseek` | openai-go (兼容) | DeepSeek-Chat 系列 |
+| Ollama | `ollama` | openai-go (兼容) | 本地开源模型 |
+| LMStudio | `lmstudio` | openai-go (兼容) | 本地模型服务 |
+| ACP | `acp` | HTTP Client | 远程 ACP Agent 代理 |
 
-| 用途 | 配置 | 回退 |
-|------|------|------|
-| 主对话 | CLI --provider/--model | — |
-| 记忆提取 | memory.extractor_model | → lightweight_model |
-| 上下文压缩 | revision.revision_model | → lightweight_model |
-| 知识图谱 | graphflow.extractor_model | → lightweight_model |
-| 检索规划 | memoryflow.planner_model | → lightweight_model |
-| Recipe覆盖 | recipe.Model | → — |
+### 9.2 Factory 模式
+
+```go
+type Factory struct {
+    providers map[string]ProviderInfo
+    default_  string
+}
+
+// 创建 LLM Model 实例
+factory.CreateModel(ctx, modelName) (model.Model, error)
+
+// 创建 Embedding Model 实例
+factory.CreateEmbeddingModel(ctx, modelName) (model.Model, error)
+```
+
+### 9.3 模型分工策略
+
+```
+主对话模型: default_provider + default_model
+    ↓ (用于: 用户对话、工具调用)
+
+后台任务模型: lightweight_provider + lightweight_model
+    ↓ (用于: 记忆提取、上下文压缩、KG提取、检索规划)
+
+回退链: 子系统.extractor_model → lightweight_model → default_provider
+```
 
 ---
 
-## 10. 技能自进化系统
+## 10. 服务与协议
 
-### 10.1 EvolutionEngine (evolution/, 6文件)
+`internal/server/acp.go` (14.57 KB) + `agui.go` (6.64 KB)
 
-```
-Agent执行 → ExecutionTrace
-  → 异步分析队列(后台goroutine, 不阻塞主循环)
-  → LLM Analysis (置信度≥0.7)
-  → PatchSuggestion
-  → 备份SKILL.md (版本管理, 保留10个历史版本)
-  → 应用补丁 (最大8KB)
-  → SkillManager.Refresh (热重载)
-```
-
-### 10.2 约束机制
-
-| 约束 | 值 |
-|------|-----|
-| 最小置信度 | 0.7 |
-| 冷却时间 | 30min |
-| 每日上限 | 10 |
-| 最大补丁 | 8KB |
-| 版本保留 | 10 |
-
----
-
-## 11. 子代理委派与技能系统
-
-### 11.1 SummonManager (summon/)
-
-- 子代理包装为可调用工具 (llmagent构建)
-- 温度0.3, 最大LLM调用10次
-- 并发控制(max_concurrent: 5)
-- A2A远程代理支持 (agenttool.NewTool包装)
-
-### 11.2 SkillManager (skill/manager.go)
-
-- 从.skills目录加载SKILL.md文件
-- 自动加载(auto_load) + 热重载
-- 通过SkillRefresher接口与Evolution联动
-
-### 11.3 A2A Server (summon/a2a.go)
-
-- tRPC-A2A-Go标准通信
-- API Key认证(`X-API-Key`)
-- A2A远程代理配置列表(`a2a_remotes`)
-
----
-
-## 12. 配置系统
-
-### 12.1 加载优先级 (7级)
-
-```
-1. CLI参数  2. 环境变量(WUKONG_前缀)  3. --config指定文件
-4. ./config.yaml  5. ~/.config/wukong/config.yaml
-6. /etc/wukong/config.yaml  7. 内置默认值
-```
-
-### 12.2 配置段分类 (30+, 38结构体)
-
-| 类别 | 配置段 | 结构体数 |
-|------|--------|----------|
-| 全局 | log_level, default_provider, lightweight_*, providers | 2 |
-| 核心 | agent(35+字段), security(12字段) | 3 |
-| 存储 | session, memory, todo, recall | 4 |
-| 记忆 | cortex, memoryflow, graphflow, importflow | 4 |
-| 上下文 | revision(11字段) | 1 |
-| 工具 | browser, visualiser, tutorial, top_of_mind, code_mode, apps, ard | 7 |
-| 编排 | summon, skill, evolution, knowledge, workflow, dify | 6 |
-| 服务 | a2a_server, agui, acp_server, acp_mcp | 4 |
-| 观测 | telemetry, observability, eval, artifact | 4 |
-| 其他 | extensions, project_dir | 2 |
-
----
-
-## 13. 服务与协议层
-
-### 13.1 协议端点
+### 10.1 四协议概览
 
 | 协议 | 端口 | 路径 | 用途 | 实现 |
 |------|------|------|------|------|
-| A2A | 9090 | / | Agent-to-Agent标准通信 | summon/a2a.go |
-| ACP | 9091 | /acp | Agent Client Protocol | server/acp.go |
-| AG-UI SSE | 8080 | /agui | Web UI实时对话(SSE流) | server/agui.go |
-| ACP MCP | 3400 | /mcp | 跨协议工具桥接 | extension/acp_mcp.go |
+| A2A | 9090 | — | Agent-to-Agent 标准通信 | tRPC-A2A-Go v0.2.5 |
+| ACP | 9091 | `/acp` | Agent Client Protocol | 自实现 HTTP Server |
+| AG-UI SSE | 8080 | `/agui` | Web UI 实时对话流 | SSE (Server-Sent Events) |
+| ACP MCP | 3400 | `/mcp` | 跨协议工具桥接 | HTTP → MCP 翻译 |
 
-### 13.2 CLI命令体系
+### 10.2 Bootstrap 启动序列（28 步）
 
-| 命令 | 说明 | 文件 |
-|------|------|------|
-| `session` | 交互会话(BubbleTea TUI) | cli/session.go(1317行) |
-| `run` | 非交互式单次执行 | cli/run.go |
-| `configure` | 交互式配置向导 | cli/configure.go |
-| `extension` | 扩展管理 | cli/extension.go |
-| `eval` | 代理评估 | cli/eval.go |
-| `project(s)` | 项目管理 | cli/project.go |
-| `version` | 版本信息 | cli/version.go |
-| `completion` | Shell自动补全 | cli/root.go |
-
-### 13.3 Bootstrap 流程 (28步严格顺序)
+`internal/cli/session.go` 中的 `bootstrapSession()` 函数按严格顺序初始化所有子系统：
 
 ```
-1.配置加载→2.日志级别→3.配置验证→4.OpenTelemetry→5.内置扩展注册
-→6.CLI覆盖→7.模型工厂→8.MultiPool→9.会话服务→10.记忆提取模型
-→11.记忆管理器→12.SmartCleanup→13.安全守卫→14.扩展管理器
-→15.记忆服务注入→16.扩展工具集→17.ACP MCP桥接→18.Recall/Cortex
-→19.MemoryFlow→20.Recall管理器→21.GraphFlow→22.ImportFlow
-→23.TopOfMind→24.CodeMode→25.Apps→26.Agent工具集→27.Summon→28.Skill
+ 1. 加载配置 (Viper)
+ 2. 设置日志级别
+ 3. 验证配置
+ 4. 初始化 OpenTelemetry
+ 5. 注册 12 个内置扩展
+ 6. 应用 CLI 参数覆盖
+ 7. 创建 Model Provider Factory
+ 8. 创建 MultiPool 数据库池
+ 9. 创建 Session Service (SQLite)
+10. 创建 Memory Service (SQLite)
+11. 创建 Todo Service
+12. 创建 Recall Store (FTS5)
+13. 创建 Cortex Store (HNSW)
+14. 创建 Embedder
+15. 创建 MemoryFlow Service
+16. 创建 GraphFlow Service
+17. 创建 Security Guard
+18. 创建 Context Manager (Revision)
+19. 加载 TopOfMind 持久指令
+20. 创建 CoreLoop
+21. 启动 A2A Server
+22. 启动 ACP Server
+23. 启动 AG-UI Server
+24. 启动 ACP MCP Bridge
+25. 启动 Evolution Engine
+26. 启动 Skill Manager (热重载)
+27. 启动 Project Manager
+28. 启动 TUI 交互界面
 ```
+
+### 10.3 ACP Server
+
+ACP (Agent Client Protocol) 提供 HTTP 接口供外部客户端连接：
+
+- **Session 管理**: 创建/获取/删除会话
+- **消息处理**: 发送用户消息，接收 Agent 响应
+- **流式输出**: SSE 方式流式返回 Agent 响应
+- **工具调用**: 通过 ACP MCP Bridge 调用 MCP 工具
+
+### 10.4 AG-UI Server
+
+AG-UI 通过 SSE 提供实时对话流：
+
+- 事件类型: `text` / `tool_call` / `tool_result` / `error` / `done`
+- 支持 `Last-Event-ID` 断线重连
 
 ---
 
-## 14. 存储架构
+## 11. CortexDB 记忆栈详解
 
-### 14.1 单文件数据库
+`internal/cortex/` (12 源文件)
+
+### 11.1 组件关系图
 
 ```
-wukong.db (SQLite WAL, shared MultiPool)
-├── sessions              ← Session Service
-├── memories              ← tRPC Memory Service
-├── recall                ← FTS5全文搜索 Store
-│   ├── chat_recall         (消息表)
-│   ├── chat_recall_fts     (FTS5虚拟表, unicode61分词)
-│   └── chat_recall_vec     (向量表, JSON格式)
-├── todos                 ← Todo Store
-├── projects              ← Project Manager
-├── cortex_*              ← CortexDB (episodes/entities/relations/HNSW)
-├── evolution_*           ← Evolution (skill_versions/evolution_records)
-├── app_versions          ← Apps History (max 20版本)
-└── extension_*           ← Extension Manager registry
+┌──────────────────────────────────────────────────────┐
+│                   CortexDB Stack                       │
+├─────────────┬──────────────┬───────────┬──────────────┤
+│ CortexStore  │ MemoryFlow   │ GraphFlow  │ ImportFlow   │
+│ (核心存储)    │ (转录+唤醒)    │ (知识图谱)  │ (结构导入)    │
+├─────────────┼──────────────┼───────────┼──────────────┤
+│ embedder.go │ extractor.go │ planner.go │ lexical.go   │
+│ (向量嵌入)    │ (实体提取)     │ (检索计划)  │ (词汇搜索)     │
+├─────────────┴──────────────┴───────────┴──────────────┤
+│  recall_manager.go   kg_tools.go   json_generator.go   │
+│  (统一召回管理)        (KG工具)       (JSON输出)         │
+└──────────────────────────────────────────────────────┘
 ```
 
-### 14.2 DatabasePool / MultiPool
+### 11.2 核心组件
 
-| 参数 | 值 | 说明 |
-|------|-----|------|
-| `_journal_mode` | WAL | 写前日志, 支持并发读 |
-| `_synchronous` | NORMAL | 平衡性能与安全 |
-| `_foreign_keys` | ON | 外键约束 |
-| `_busy_timeout` | 5000ms | 忙等待超时 |
-| `MaxOpenConns` | 4 | 最大打开连接 |
-| `MaxIdleConns` | 2 | 最大空闲连接 |
-
-关闭时执行 `PRAGMA wal_checkpoint(TRUNCATE)`。
-
----
-
-## 15. 应用管理与辅助模块
-
-### 15.1 Apps Manager (apps/, 5子目录)
-
-| 子目录 | 文件 | 功能 |
-|--------|------|------|
-| `clone/` | 4文件 | Git克隆 + ZIP解压 + 缓存管理 |
-| `pack/` | 4文件 | HTML打包(ZIP/ZIM格式) |
-| `sanitize/` | 1文件 | HTML DOM清洗(golang.org/x/net/html) |
-| `server/` | 1文件 | 本地HTTP预览服务 |
-| `mcpapps/` | 4文件 | MCP Apps协议(JSON-RPC桥+沙箱) |
-| 根 | manager.go + history.go | 生命周期 + 版本历史(max 20版本) |
-
-### 15.2 ARD 系统 (ard/, 15文件)
-
-Agentic Resource Discovery — AI Agent/MCP Server资源发现:
-- URN解析与构建 (urn.go)
-- 目录管理 (catalog.go, explore.go)
-- 远程注册表 (registry.go)
-- 联邦搜索 (federation.go)
-- 密码学验证: Ed25519/ECDSA/RSA (trust/)
-- 工具集 (tools.go)
-- HTTP服务 (server.go, client.go)
-
-### 15.3 ZIM 公共库 (pkg/zim/, 4文件)
-
-- Packer: 构建ZIM文件(AddContent/Redirect/Metadata/SetMainPage/Build/WriteTo)
-- Reader: 读取ZIM(Open/Get/EntryAt/MainPage/Count/MimeTypes)
-- 压缩: zstd(文本簇), 不压缩(二进制簇)
-- 校验和: 完整文件MD5, 确定性UUID
-
-### 15.4 其他辅助模块
-
-| 模块 | 功能 |
-|------|------|
-| telemetry/ | OpenTelemetry分布式追踪 |
-| observability/ | Langfuse LLM追踪 |
-| health/ | 健康检查 (/health/live/ready) |
-| artifact/ | 制品存储(inmemory/COS) |
-| eval/ | Agent评估与回归测试 |
-| project/ | 工作目录追踪 |
-| topofmind/ | 持久化指令注入 |
-| util/ | DatabasePool/MultiPool/Logger |
-
----
-
-## 16. 关键设计决策 (ADR)
-
-| ADR | 决策 | 影响 |
-|-----|------|------|
-| ADR-1 | SQLite WAL共享池, MaxOpenConns=4 | 单文件部署+并发+跨系统查询零成本 |
-| ADR-2 | 双引擎记忆(tRPC+CortexDB) | KV持久化+向量/图谱结构化 |
-| ADR-3 | 轻量模型分工 | 节省主模型token |
-| ADR-4 | CortexDB WAL共享 | 避免多连接冲突 |
-| ADR-5 | MemoryFlow→tRPC Bridge | 转录事实自动提升为持久记忆 |
-| ADR-6 | MCP Broker 4入口模式 | 防止工具泛滥 |
-| ADR-7 | 冷启动友好降级(无Embedding→FTS5) | 渐进式增强 |
-| ADR-8 | 单文件数据库 | 部署简单、备份方便 |
-| ADR-9 | SmartCleanup(70%新鲜度+30%长度) | 合理淘汰策略 |
-| ADR-10 | 记忆去重30字符滑动窗口 | 轻量高效 |
-| ADR-11 | Tool消息完整索引(FTS5+HNSW) | 不丢失工具上下文 |
-| ADR-12 | GraphFlow auto_extract | 每轮对话自动KG |
-| ADR-13 | Extractor 3层回退链 | 专用模型→默认→启发式 |
-| ADR-14 | 非阻塞Evolution(后台goroutine) | 不阻塞主循环 |
-| ADR-15 | CoreLoop依赖注入 | 12子系统接口隔离 |
-| ADR-16 | 四协议服务器(A2A/ACP/AG-UI/MCP) | 多场景覆盖 |
-| ADR-17 | HTTP body 10MB限制 | DoS防护 |
-| ADR-18 | goja JS多层沙箱 | API白名单+内存+并发+ReDoS |
-| ADR-19 | Context超时覆盖 | 防止goroutine泄漏 |
-| ADR-20 | bgWg后台goroutine管理 | 关闭前Wait() |
-| ADR-21 | OS级沙箱跨平台(Landlock/Seatbelt/LowIL) | 无需Docker |
-| ADR-22 | sandbox独立pkg/包 | 外部项目可复用 |
-| ADR-23 | Recipe拓扑排序 | DAG依赖+循环检测 |
-| ADR-24 | MultiPool命名池管理 | 子系统可独立或共享DB |
-| ADR-25 | ARD联邦搜索 | 本地+远程去重合并 |
-| ADR-26 | Sanitize DOM树遍历(含正则回退) | 安全HTML清洗 |
-| ADR-27 | Apps版本历史(max 20) | 非破坏性更新 |
-| ADR-28 | 提示模板分离(system_prompt_dir) | 自定义系统指令 |
-
----
-
-## 17. 技术选型
-
-| 类别 | 选择 | 版本 | 理由 |
+| 组件 | 文件 | 功能 | 技术 |
 |------|------|------|------|
-| Agent框架 | tRPC-Agent-Go | v1.10.0 | 多Agent编排/Session/Memory/Planner/Skill/TodoEnforcer |
-| MCP协议 | tRPC-MCP-Go | v0.0.16 | stdio/SSE/Streamable三传输 |
-| A2A协议 | tRPC-A2A-Go | v0.2.5 | Agent间标准通信 |
-| 智能记忆 | CortexDB | v2.25.0 | HNSW+FTS5+RDF/SPARQL |
-| JS引擎 | goja | latest | 纯Go零CGO, 沙箱友好 |
-| OS沙箱 | pkg/sandbox | 自维护 | Landlock/Seatbelt/LowIL |
-| 数据库 | SQLite WAL | modernc/mattn | 单文件零配置 |
-| TUI | BubbleTea+LipGloss | latest | 纯Go, 零外部依赖 |
-| 浏览器 | Chromedp | latest | Chrome DevTools |
-| 配置 | Viper+Cobra | latest | CLI>ENV>YAML |
-| 可观测 | OpenTelemetry+Langfuse | latest | 全链路+LLM专用 |
-| 文件监听 | fsnotify | v1.8.0 | Recipe热重载 |
-| 模板 | text/template | stdlib | Recipe渲染 |
-| HTML清洗 | golang.org/x/net/html | latest | DOM树安全遍历 |
-| 压缩 | zstd(kla uspost) | v1.18.6 | ZIM文本簇 |
-| UUID | google/uuid | v1.6.0 | 确定性UUID |
-| 缓存 | go-redis/v9 | v9.12.1 | Session Redis(可选) |
-| 语言 | Go | 1.26 | 跨平台单二进制 |
+| CortexStore | `store.go` | HNSW 向量 + FTS5 全文混合检索 | CortexDB |
+| LexicalStore | `lexical.go` | 纯 FTS5 词法搜索 | SQLite FTS5 |
+| Embedder | `embedder.go` | 文本 → 向量嵌入 | OpenAI 兼容 API |
+| MemoryFlow | `memoryflow.go` | 转录记录 + 3 层唤醒上下文 | CortexDB |
+| GraphFlow | `graphflow.go` | 实体/关系提取 + RDF 图谱 | CortexDB RDF |
+| Extractor | `extractor.go` | LLM 驱动实体和关系提取 | LLM (lightweight) |
+| Planner | `planner.go` | 查询计划生成 | LLM (lightweight) |
+| RecallManager | `recall_manager.go` | 统一召回（FTS5 + HNSW + KG） | 多源融合 |
+| ImportFlow | `import_flow.go` | DDL/结构化数据 → KG 映射 | CortexDB |
+| ImportTools | `import_tools.go` | 导入工具集 | — |
+| KGTools | `kg_tools.go` | 知识图谱 CRUD 工具 | SPARQL |
+| JSONGenerator | `json_generator.go` | JSON 格式输出 | — |
 
 ---
 
-## 18. 模块依赖关系图
+## 12. 关键子系统
 
+### 12.1 上下文压缩 (Revision)
+
+`internal/agent/context.go`
+
+3 层压缩策略:
+1. **Trim**: 裁剪旧消息，保留最近 N 轮
+2. **LLM Summarize**: 用轻量模型生成对话摘要
+3. **Semantic Search**: 语义检索补充相关信息
+
+配置:
+```yaml
+revision:
+  enabled: true
+  enable_llm_summarize: true
+  summary_cooldown: 120s
+  max_context_tokens: 64000
+  trim_ratio: 0.3
 ```
-cmd/wukong/main.go
-  └── cli/Execute()
-        ├── cli/root.go (cobra 9子命令)
-        ├── cli/session.go (bootstrapSession, 28步)
-        │     ├── config/config.go (Viper配置, 38结构体)
-        │     ├── provider/factory.go (7 LLM后端)
-        │     ├── util/database.go (MultiPool)
-        │     ├── session/ (会话存储)
-        │     ├── memory/store.go (长期记忆)
-        │     ├── security/guard.go (安全守卫)
-        │     ├── extension/manager.go + builtin/* (12扩展)
-        │     │     ├── extension/mcp_client.go
-        │     │     └── extension/acp_mcp.go
-        │     ├── recall/store.go + tool.go
-        │     ├── cortex/{store,lexical,memoryflow,graphflow,...} (12文件)
-        │     ├── topofmind/mind.go
-        │     ├── codemode/executor.go
-        │     ├── apps/{manager,history,clone,pack,sanitize,server}(5子目录)
-        │     ├── summon/ (子代理委派+A2A)
-        │     ├── skill/manager.go
-        │     └── evolution/engine.go
-        ├── agent/loop.go (CoreLoop)
-        │     ├── agent/workflow.go (10种编排)
-        │     ├── agent/team.go (多Agent团队)
-        │     ├── agent/context.go (上下文压缩)
-        │     ├── agent/hitl.go (人机协同)
-        │     ├── agent/{prompt_template,dify,todo_enforcer}.go
-        │     └── agent/recipe*.go (5文件Recipe系统)
-        ├── server/{agui,acp}.go
-        ├── knowledge/manager.go
-        ├── browser/controller.go
-        ├── eval/eval.go
-        ├── telemetry/ + observability/
-        ├── artifact/
-        ├── health/health.go
-        └── project/manager.go
-              ↓
-        pkg/sandbox/ (跨平台OS沙箱)
-        pkg/zim/ (ZIM格式库)
+
+### 12.2 HITL 人机协同
+
+`internal/agent/hitl.go` (5.49 KB)
+
+在关键决策点暂停执行，等待用户确认：
+- 危险操作拦截
+- 需确认的工具调用
+- 多步计划的中间检查点
+
+### 12.3 TodoEnforcer
+
+`internal/agent/todo_enforcer.go` (2.93 KB)
+
+强制 Agent 在执行多步任务时维护 TODO 列表：
+- 自动解析 Agent 的 TODO 更新
+- 阻止在未完成前置步骤时跳过任务
+- 提供 `todo_write` 工具
+
+### 12.4 提示模板系统
+
+`internal/agent/prompt_template.go` (4.44 KB)
+
+- 基于 `text/template` 的提示模板引擎
+- 支持条件/循环/变量
+- 从 `system_prompt_dir` 加载模板文件
+- 运行时变量注入（日期、用户信息、持久指令等）
+
+### 12.5 会话持久化
+
+`internal/session/` (3 文件)
+
+| 后端 | 文件 | 特点 |
+|------|------|------|
+| SQLite | `store.go` | 默认，本地持久化，单文件 |
+| Redis | `redis.go` | 分布式，多实例共享 |
+| 内存 | `store.go` | 测试/临时使用 |
+
+### 12.6 Evolution 引擎
+
+`internal/evolution/` (6 文件)
+
+技能自进化流程：
 ```
+1. Monitor    — 监控 Recipe 执行失败
+2. Analyze    — LLM 分析失败原因
+3. Patch      — 自动生成修复补丁
+4. Version    — 版本管理存储
+5. Reload     — fsnotify 热重载
+```
+
+### 12.7 Summon 子代理委派
+
+`internal/summon/` (6 文件)
+
+- **delegate.go**: 本地子代理创建和管理
+- **a2a.go**: A2A 远程代理通信
+- **auth.go**: A2A 身份认证（JWT）
+
+### 12.8 CodeMode JS 沙箱
+
+`internal/codemode/executor.go` (15.45 KB)
+
+goja JavaScript 执行器：
+- 5 层安全限制
+- API 白名单（console.log / JSON / Math / Date）
+- 128MB 内存 / 5 并发 / 1MB 代码 / 10s 超时
+- ReDoS 正则防护
+
+### 12.9 Browser 浏览器自动化
+
+`internal/browser/controller.go` (16.41 KB)
+
+基于 Chromedp 的浏览器自动化：
+- 导航/截图/点击/输入/滚动
+- 搜索引擎后端: DuckDuckGo / SearXNG / Tavily
+- Headless 模式 / 自定义视口 / 下载大小限制
+
+### 12.10 Apps 应用管理
+
+`internal/apps/` (18 文件, 5 子目录)
+
+| 子目录 | 功能 |
+|--------|------|
+| `clone/` | Git 克隆 + 缓存 |
+| `pack/` | 应用打包（ZIM 格式） |
+| `sanitize/` | HTML/CSS/JS 清理 |
+| `server/` | 本地 HTTP 服务 |
+| `mcpapps/` | MCP 应用桥接 |
+| — | `manager.go` — 生命周期管理 |
+| — | `history.go` — 版本历史 |
+
+### 12.11 Project 项目追踪
+
+`internal/project/manager.go` (6.46 KB)
+
+- 工作目录与会话关联
+- 会话恢复（从上次中断点继续）
+- 项目状态持久化
+
+### 12.12 TopOfMind 持久指令
+
+`internal/topofmind/mind.go` (3.60 KB)
+
+- 从 `.wukong/instructions.md` 加载持久指令
+- 注入到系统提示中
+- 支持 `fsnotify` 热更新
+
+---
+
+## 13. 底层基础设施
+
+### 13.1 数据库 MultiPool
+
+`internal/util/database.go` (6.21 KB)
+
+共享 SQLite 连接池：
+```go
+// WAL 模式, MaxOpenConns=4, synchronous=NORMAL, busy_timeout=5000ms
+pool := util.NewDatabasePool("wukong.db", maxOpenConns)
+```
+
+所有子系统共享同一个 `*sql.DB`，避免 SQLite 事务冲突。
+
+### 13.2 日志系统
+
+`internal/util/logger.go` (1.38 KB)
+
+- 基于 `log/slog` 结构化日志
+- 支持 debug/info/warn/error 级别
+- JSON 和 Text 两种格式
+
+### 13.3 可观测性
+
+#### OpenTelemetry
+
+`internal/telemetry/telemetry.go` (5.84 KB)
+
+- 分布式追踪（Traces）
+- 支持 gRPC/HTTP 导出器
+- Console 本地导出（开发模式）
+
+#### Langfuse
+
+`internal/observability/langfuse.go` (2.04 KB)
+
+- LLM 调用追踪
+- Token 用量统计
+- 延迟分析
+
+### 13.4 OS 沙箱 (pkg/sandbox)
+
+`pkg/sandbox/` (10 文件)
+
+跨平台文件系统隔离：
+
+| 平台 | 后端 | 机制 |
+|------|------|------|
+| Linux | Landlock | 内核 5.13+ 内建 |
+| macOS | seatbelt | sandbox-exec(1) |
+| Windows | Low IL | 强制完整性标签 |
+| 其他 | none | 未沙箱运行（警告） |
+
+特点：
+- `os/exec` 兼容 API
+- 自动探测当前平台能力
+- 不支持时优雅降级
+- 无外部依赖
+
+### 13.5 ZIM 格式库 (pkg/zim)
+
+`pkg/zim/` (4 文件)
+
+- ZIM 格式读写
+- 用于 Apps 打包
+- 支持压缩索引
+
+---
+
+## 14. 关键设计决策 (ADRs)
+
+| # | 决策 | 理由 |
+|---|------|------|
+| 1 | SQLite WAL 共享 MultiPool | 避免多连接事务冲突，单文件部署 |
+| 2 | 双引擎记忆（tRPC + CortexDB） | tRPC 负责长期关键事实，CortexDB 负责语义搜索和知识图谱 |
+| 3 | 轻量模型分工 | 主模型处理对话，轻量模型处理后台提取任务 |
+| 4 | CoreLoop 依赖注入 | 所有子系统通过 Config 注入，支持替换和测试 |
+| 5 | MemoryFlow → tRPC Bridge | 短期事实经评估后提升为长期记忆 |
+| 6 | 文件式 Recipe 定义 | YAML 文件热重载，无需重新编译 |
+| 7 | 冷启动友好降级 | 无 embedder → 回退 FTS5；无 LLM → 仅结构操作 |
+| 8 | HITL 融入编排循环 | 非附加式，在决策点原生暂停 |
+| 9 | SmartCleanup 容量淘汰 | 70% 新鲜度 + 30% 长度，80% 触发 → 60% 目标 |
+| 10 | Extension Manager 统一管理 | 内置和外部 MCP 采用统一接口 |
+| 11 | ACP + AG-UI 双 UI 协议 | ACP 面向客户端，AG-UI SSE 面向浏览器 |
+| 12 | ACP MCP Bridge | 跨协议工具调用，ACP 客户端可操作 MCP 工具 |
+| 13 | MCP Broker 批量管理 | 外部 MCP Server 通过 Broker 统一暴露 |
+| 14 | 提示模板分离 | text/template 渲染，运行时变量注入 |
+| 15 | goja JS 多层沙箱 | API白名单+内存+并发+ReDoS+代码长度 5 层限制 |
+| 16 | OS 级沙箱跨平台 | Landlock/Seatbelt/LowIL 三种后端 |
+| 17 | ARD 双向发现 | 联邦搜索 + RegistryServer 发布 |
+| 18 | ARD 联邦搜索 | 多 Registry 并行搜索 + 结果去重 |
+| 19 | Evolution 版本管理 | 每个补丁保留版本，支持回滚 |
+| 20 | TopOfMind 持久指令 | fsnotify 监控文件变更，自动重载 |
+| 21 | 单文件 wukong.db 全栈存储 | 简化部署，SQLite WAL 提供足够并发 |
+| 22 | OpenTelemetry 分布式追踪 | 标准化可观测性，支持多种导出器 |
+| 23 | Chromedp 浏览器自动化 | 纯 Go 实现，无外部依赖 |
+| 24 | Recipe 重试指数退避 | `initial_wait * backoff_factor^(attempt-1)` |
+| 25 | 4 协议服务器共存 | 满足不同客户端需求 |
+| 26 | goroutine 生命周期管理 | `bgWg` + context 确保优雅关闭 |
+| 27 | ToolSearch 自动工具筛选 | 大量工具时减少提示词 token 消耗 |
+| 28 | ContextCompaction 两遍压缩 | Trim + LLM Summarize 双层保障 |
+
+---
+
+## 15. 技术栈全景
+
+| 类别 | 技术 | 版本 | 用途 |
+|------|------|------|------|
+| Agent 框架 | tRPC-Agent-Go | v1.10.0 | Agent 编排、Runner、Planner、Guardrail |
+| MCP 协议 | tRPC-MCP-Go | v0.0.16 | 模型上下文协议（MCP Broker + Client） |
+| A2A 协议 | tRPC-A2A-Go | v0.2.5 | Agent-to-Agent 通信 |
+| 智能记忆 | CortexDB | v2.25.0 | HNSW 向量 + FTS5 全文 + RDF 图谱 |
+| CLI 框架 | Cobra | v1.9.1 | 命令行解析 |
+| 配置管理 | Viper | v1.20.1 | 7 级配置加载 |
+| TUI 界面 | Bubbletea + Bubbles + LipGloss | v1.3.10 / v0.21.0 / v1.1.0 | 三区交互终端 |
+| 浏览器 | Chromedp | v0.15.1 | 无头浏览器自动化 |
+| JS 引擎 | goja | latest | JavaScript 沙箱执行 |
+| LLM SDK | openai-go | v1.12.0 | OpenAI 兼容 API |
+| 数据库 | modernc.org/sqlite | v1.38.2 | 纯 Go SQLite (CGO 禁用) |
+| 缓存 | go-redis | v9.12.1 | Redis 会话后端 |
+| 文件监控 | fsnotify | v1.8.0 | 技能/配置热重载 |
+| 可观测性 | OpenTelemetry | v1.43.0 | 分布式追踪 |
+| UUID | google/uuid | v1.6.0 | 唯一标识生成 |
+| JSON | goccy/go-json | v0.10.6 | 高性能 JSON 库 |
+| JWT | lestrrat-go/jwx | v2.1.4 | A2A 身份认证 |
+| 文件 | doublestar | v4.9.1 | glob 模式匹配 |
+| 并发池 | ants | v2.10.0 | goroutine 池管理 |

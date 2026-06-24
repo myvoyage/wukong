@@ -215,6 +215,94 @@ func (ts *ToolSet) ExportCatalog() ([]byte, error) {
 	return json.MarshalIndent(ts.manager.GetCatalog(), "", "  ")
 }
 
+// PublishAndServe creates an ARD Registry, injects Wukong built-in
+// entries, and starts a RegistryServer on the configured port so
+// that other ARD-compatible AI Agents can discover Wukong.
+//
+// The returned RegistryServer can be shut down with Shutdown(ctx).
+// If publishPort is 0, no server is started and nil is returned.
+func PublishAndServe(ctx context.Context, publishPort int,
+	catalogPath string) (*RegistryServer, error) {
+	if publishPort <= 0 {
+		return nil, nil
+	}
+
+	config := DefaultRegistryConfig()
+	config.Port = publishPort
+	config.CatalogPath = catalogPath
+
+	r, err := NewRegistryWithEntries(config)
+	if err != nil {
+		return nil, err
+	}
+
+	server := NewRegistryServer(r, config)
+	go func() {
+		util.Logger.Info("ard: registry server starting",
+			"port", publishPort,
+			"endpoint", "/.well-known/ai-catalog.json")
+		if err := server.Start(ctx); err != nil &&
+			err.Error() != "http: Server closed" {
+			util.Logger.Warn("ard: registry server stopped",
+				"error", err.Error())
+		}
+	}()
+
+	return server, nil
+}
+
+// NewRegistryWithEntries creates a Registry pre-populated with
+// Wukong's built-in entries, making the catalog immediately
+// useful when served to other ARD-compatible agents.
+func NewRegistryWithEntries(config *RegistryConfig) (*Registry, error) {
+	r, err := NewRegistry(config)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, entry := range WukongBuiltInEntries() {
+		if r.GetEntry(entry.Identifier) != nil {
+			continue // Already registered
+		}
+		if err := r.Register(entry); err != nil {
+			util.Logger.Warn("ard: failed to register built-in entry",
+				"identifier", entry.Identifier,
+				"error", err.Error())
+		}
+	}
+
+	util.Logger.Info("ard: registry initialized with built-in entries",
+		"count", len(WukongBuiltInEntries()))
+	return r, nil
+}
+
+// RegisterA2AAgent registers an A2A remote agent in the ARD catalog
+// for federated discovery. It is a convenience function that creates
+// a properly structured CatalogEntry from A2A connection metadata.
+//
+// This is called during session bootstrap when A2A remotes are
+// configured, enabling other agents to discover them via ARD.
+func RegisterA2AAgent(ts *ToolSet, name, description, serverURL string) {
+	entry := CatalogEntry{
+		Identifier:   "urn:air:wukong.local:agent:" + name,
+		DisplayName:  name,
+		Type:         MediaTypeA2AAgentCard,
+		URL:          serverURL,
+		Description:  description,
+		Tags:         []string{"a2a", "remote", "agent"},
+		Capabilities: []string{"a2a"},
+	}
+	if err := ts.Register(entry); err != nil {
+		util.Logger.Warn("ard: failed to register A2A agent",
+			"name", name,
+			"error", err.Error())
+	} else {
+		util.Logger.Info("ard: A2A agent registered to catalog",
+			"name", name,
+			"identifier", entry.Identifier)
+	}
+}
+
 // ImportCatalog imports a catalog from JSON and merges entries
 // with the existing catalog. Entries with the same URN are
 // updated; new entries are appended.

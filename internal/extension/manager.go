@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/km269/wukong/internal/ard"
 	"github.com/km269/wukong/internal/config"
 	"github.com/km269/wukong/internal/util"
 
@@ -28,6 +29,7 @@ type Manager struct {
 	toolSets map[string]tool.ToolSet
 	status   map[string]ExtensionInfo
 	cfg      *config.WukongConfig
+	ardTS    *ard.ToolSet // Optional ARD integration for auto-discovery
 }
 
 // NewManager creates a new extension manager.
@@ -37,6 +39,16 @@ func NewManager(cfg *config.WukongConfig) *Manager {
 		status:   make(map[string]ExtensionInfo),
 		cfg:      cfg,
 	}
+}
+
+// SetARDToolSet sets the ARD ToolSet for auto-discovery integration.
+// When set, external MCP servers are automatically registered to the
+// ARD catalog upon connection, enabling federated discovery.
+// Pass nil to disable ARD integration.
+func (m *Manager) SetARDToolSet(ts *ard.ToolSet) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.ardTS = ts
 }
 
 // Initialize loads and initializes all enabled extensions.
@@ -379,6 +391,10 @@ func (m *Manager) registerBuiltinLocked(
 // registerExternalLocked registers an external MCP server extension.
 // It uses the MCPClient wrapper for improved observability and
 // lifecycle management via trpc-mcp-go native APIs.
+//
+// When ARD integration is enabled (ardTS != nil), the MCP server is
+// automatically registered to the ARD catalog with its connection
+// metadata, enabling federated discovery across registries.
 func (m *Manager) registerExternalLocked(
 	ctx context.Context, ext config.ExtensionConfig,
 ) error {
@@ -394,7 +410,45 @@ func (m *Manager) registerExternalLocked(
 	}
 
 	m.toolSets[ext.Name] = mcpClient.ToolSet()
+
+	// Auto-register to ARD catalog for federated discovery.
+	if m.ardTS != nil {
+		ardEntry := buildARDEntry(ext)
+		if err := m.ardTS.Register(ardEntry); err != nil {
+			util.Logger.Warn("ard: failed to register MCP server",
+				"name", ext.Name,
+				"error", err.Error())
+		} else {
+			util.Logger.Info("ard: MCP server registered to catalog",
+				"name", ext.Name,
+				"identifier", ardEntry.Identifier)
+		}
+	}
+
 	return nil
+}
+
+// buildARDEntry creates a CatalogEntry from an ExtensionConfig for
+// ARD auto-registration. MCP servers are registered with their
+// transport connection metadata.
+func buildARDEntry(ext config.ExtensionConfig) ard.CatalogEntry {
+	entry := ard.CatalogEntry{
+		Identifier: "urn:air:wukong.local:mcp:" + ext.Name,
+		DisplayName: ext.Name,
+		Type:       ard.MediaTypeMCPServerCard,
+		Tags:       []string{"mcp", "external", ext.Transport},
+	}
+
+	// Store connection metadata in the Data field.
+	if ext.URL != "" {
+		entry.URL = ext.URL
+		entry.Tags = append(entry.Tags, "remote")
+	} else if ext.Command != "" {
+		entry.Tags = append(entry.Tags, "local")
+	}
+
+	entry.Capabilities = []string{ext.Transport}
+	return entry
 }
 
 // applyEnvOverrides temporarily sets environment variables for the MCP

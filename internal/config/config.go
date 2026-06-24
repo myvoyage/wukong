@@ -776,6 +776,13 @@ type ARDConfig struct {
 	RegistryURL string `mapstructure:"registry_url"`
 	// CatalogPath is the local ARD catalog file path.
 	CatalogPath string `mapstructure:"catalog_path"`
+	// PublishPort is the port for Wukong's own ARD registry server,
+	// making Wukong discoverable by other ARD-compatible agents.
+	// Default: 0 (disabled).
+	PublishPort int `mapstructure:"publish_port"`
+	// PublishEnabled controls whether Wukong exposes itself as a
+	// discoverable ARD registry. Default: false.
+	PublishEnabled bool `mapstructure:"publish_enabled"`
 }
 
 // ============================================================================
@@ -1464,6 +1471,8 @@ func (l *Loader) setDefaults() {
 	l.v.SetDefault("ard.enabled", false)
 	l.v.SetDefault("ard.registry_url", "")
 	l.v.SetDefault("ard.catalog_path", ".wukong/ard/catalog.json")
+	l.v.SetDefault("ard.publish_enabled", false)
+	l.v.SetDefault("ard.publish_port", 0)
 
 	// --- Summon defaults ---
 	l.v.SetDefault("summon.enabled", true)
