@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 )
@@ -197,16 +198,24 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 清理路径
+	// 清理路径并防止目录遍历。
 	path = filepath.Clean(path)
 
 	// 构建完整文件路径
 	filePath := filepath.Join(s.rootDir, path)
 
-	// 安全检查：确保路径在根目录内
+	// 安全检查：确保最终路径在根目录内。
+	// filepath.Clean 后检查前缀比 filepath.Rel 更可靠。
 	absRoot, _ := filepath.Abs(s.rootDir)
 	absFile, err := filepath.Abs(filePath)
-	if err != nil || !hasPrefix(absFile, absRoot) {
+	if err != nil {
+		http.Error(w, "Forbidden", http.StatusForbidden)
+		return
+	}
+	absFile = filepath.Clean(absFile)
+	sep := string(os.PathSeparator)
+	if !strings.HasPrefix(absFile+sep, absRoot+sep) &&
+		absFile != absRoot {
 		http.Error(w, "Forbidden", http.StatusForbidden)
 		return
 	}
@@ -288,15 +297,6 @@ func (s *Server) serveDirectoryList(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, "</ul>\n")
 	fmt.Fprintf(w, "<p style=\"color:#666;margin-top:20px;\">Wukong Apps Preview Server</p>\n")
 	fmt.Fprintf(w, "</body>\n</html>")
-}
-
-// hasPrefix checks if path has the given prefix.
-func hasPrefix(path, prefix string) bool {
-	rel, err := filepath.Rel(prefix, path)
-	if err != nil {
-		return false
-	}
-	return rel == "." || !filepath.IsAbs(rel)
 }
 
 // exists checks if a file exists.

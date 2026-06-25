@@ -176,56 +176,117 @@ func (m *Manager) CreateAppFromImport(
 }
 
 // CloneApp clones a website and creates a new app from it.
-// This is the main entry point for website cloning functionality.
+// Uses the EnhancedCloner (Phase 2 optimized engine) with browser pool,
+// frontier-based resume, robots.txt compliance, sitemap discovery,
+// content deduplication, CSS rewriting, and mobile-friendly output.
 func (m *Manager) CloneApp(ctx context.Context, seedURL string, opts CloneOptions) (AppInfo, *CloneResult, error) {
-	// 创建克隆器
-	clonerOpts := clone.DefaultOptions()
+	// 构建增强克隆器选项
+	eco := clone.DefaultEnhancedOptions()
+
 	if opts.MaxPages > 0 {
-		clonerOpts.MaxPages = opts.MaxPages
+		eco.MaxPages = opts.MaxPages
 	}
 	if opts.MaxDepth > 0 {
-		clonerOpts.MaxDepth = opts.MaxDepth
+		eco.MaxDepth = opts.MaxDepth
 	}
 	if opts.Subdomains {
-		clonerOpts.Subdomains = true
+		eco.Subdomains = true
 	}
 	if opts.Scroll {
-		clonerOpts.Scroll = true
+		eco.Scroll = true
 	}
 	if opts.Timeout > 0 {
-		clonerOpts.Timeout = opts.Timeout
+		eco.Timeout = time.Duration(opts.Timeout) * time.Second
+	}
+	if opts.Settle > 0 {
+		eco.Settle = time.Duration(opts.Settle) * time.Millisecond
+	}
+	if opts.Traversal != "" {
+		eco.Traversal = clone.TraversalMode(opts.Traversal)
 	}
 	if opts.Workers > 0 {
-		clonerOpts.Workers = opts.Workers
+		eco.Workers = opts.Workers
+	}
+	if opts.AssetWorkers > 0 {
+		eco.AssetWorkers = opts.AssetWorkers
+	}
+	if opts.ScopePrefix != "" {
+		eco.ScopePrefix = opts.ScopePrefix
+	}
+	if opts.CrawlDelay > 0 {
+		eco.CrawlDelay = time.Duration(opts.CrawlDelay) * time.Millisecond
+	}
+	eco.Force = opts.Force
+	eco.Refresh = opts.Refresh
+
+	// 可选的布尔参数（nil 表示使用默认值）。
+	if opts.RespectRobots != nil {
+		eco.RespectRobots = *opts.RespectRobots
+	}
+	if opts.EnableResume != nil {
+		eco.EnableResume = *opts.EnableResume
+	}
+	if opts.DedupContent != nil {
+		eco.DedupContent = *opts.DedupContent
+	}
+	if opts.MobileReadable != nil {
+		eco.MobileReadable = *opts.MobileReadable
+	}
+	if opts.AssetSameDomain != nil {
+		eco.AssetSameDomain = *opts.AssetSameDomain
+	}
+	if opts.Incremental != nil {
+		eco.Incremental = *opts.Incremental
+	}
+	if opts.CacheMaxAge > 0 {
+		eco.CacheMaxAge = time.Duration(opts.CacheMaxAge) * time.Second
+	}
+	if opts.ChromePath != "" {
+		eco.ChromePath = opts.ChromePath
+	}
+	if opts.Stealth != nil {
+		eco.Stealth = *opts.Stealth
+	}
+	if opts.AntibotEnabled != nil {
+		eco.AntibotEnabled = *opts.AntibotEnabled
+	}
+	if opts.AntibotAutoEscalate != nil {
+		eco.AntibotAutoEscalate = *opts.AntibotAutoEscalate
+	}
+	if opts.CookieFile != "" {
+		eco.CookieFile = opts.CookieFile
 	}
 
-	// 设置输出目录到 apps 目录下
+	// 设置输出目录到 apps 目录下。
 	host := extractHost(seedURL)
 	outputDir := filepath.Join(m.appDir, "cloned", host)
-	clonerOpts.OutputDir = outputDir
+	eco.OutputDir = outputDir
 
-	c := clone.NewCloner(clonerOpts)
-
-	// 执行克隆
-	cloneRes, err := c.Clone(ctx, seedURL)
+	// 使用增强克隆器执行克隆。
+	cloner := clone.NewEnhancedCloner(eco)
+	cloneRes, err := cloner.Clone(ctx, seedURL)
 	if err != nil {
 		return AppInfo{}, nil, fmt.Errorf("clone website: %w", err)
 	}
 
-	// 转换结果
+	// 转换结果。
 	result := &CloneResult{
-		Success:   cloneRes.Success,
-		SeedURL:   cloneRes.SeedURL,
-		Host:      cloneRes.Host,
-		OutputDir: cloneRes.OutputDir,
-		Pages:     cloneRes.Pages,
-		Assets:    cloneRes.Assets,
-		SizeBytes: cloneRes.SizeBytes,
-		Duration:  cloneRes.Duration.String(),
-		Errors:    cloneRes.Errors,
+		Success:            cloneRes.Success,
+		SeedURL:            cloneRes.SeedURL,
+		Host:               cloneRes.Host,
+		OutputDir:          cloneRes.OutputDir,
+		Pages:              cloneRes.Pages,
+		Assets:             cloneRes.Assets,
+		SizeBytes:          cloneRes.SizeBytes,
+		Duration:           cloneRes.Duration.String(),
+		Errors:             cloneRes.Errors,
+		DedupFiles:         cloneRes.DedupFiles,
+		DedupBytesSaved:    cloneRes.DedupBytesSaved,
+		AntibotDetections:  cloneRes.AntibotDetections,
+		AntibotStats:       cloneRes.AntibotStats,
 	}
 
-	// 创建应用信息
+	// 创建应用信息。
 	now := time.Now()
 	app := AppInfo{
 		Name:        host,
@@ -252,25 +313,48 @@ func (m *Manager) CloneApp(ctx context.Context, seedURL string, opts CloneOption
 
 // CloneOptions defines options for website cloning.
 type CloneOptions struct {
-	MaxPages    int  // 最大页面数量（0 = 无限制）
-	MaxDepth    int  // 最大链接深度（0 = 无限制）
-	Subdomains  bool // 是否包含子域名
-	Scroll      bool // 是否滚动加载懒加载内容
-	Timeout     int  // 页面渲染超时（秒）
-	Workers     int  // 并发工作线程数
+	MaxPages       int    // 最大页面数量（0 = 无限制）
+	MaxDepth       int    // 最大链接深度（0 = 无限制）
+	Traversal      string // 遍历策略：bfs / dfs（空 = 默认bfs）
+	Subdomains     bool   // 是否包含子域名
+	Scroll         bool   // 是否滚动加载懒加载内容
+	Timeout        int    // 页面渲染超时（秒）
+	Settle         int    // 网络空闲等待时间（毫秒，1500 = 默认）
+	Workers        int    // 并发页面渲染线程数
+	AssetWorkers   int    // 并发资源下载线程数（0 = 与Workers相同）
+	ScopePrefix    string // 路径前缀限制
+	RespectRobots  *bool  // 是否遵守robots.txt（nil = 默认true）
+	EnableResume   *bool  // 是否启用断点续抓（nil = 默认true）
+	DedupContent   *bool  // 是否启用内容去重（nil = 默认true）
+	MobileReadable *bool  // 是否注入移动端CSS（nil = 默认true）
+	AssetSameDomain *bool // 仅下载同域资源（nil = 默认true）
+	CrawlDelay     int    // 爬取延迟（毫秒，0 = 使用robots.txt设定）
+	Incremental    *bool  // 是否启用增量缓存（nil = 默认false）
+	CacheMaxAge    int    // 缓存最长有效时间（秒，默认86400）
+	ChromePath     string // Chrome 浏览器路径（空=自动检测）
+	Stealth              *bool  // Stealth 反检测模式（nil=默认false）
+	AntibotEnabled       *bool  // 自动反爬检测（nil=默认true）
+	AntibotAutoEscalate  *bool  // 自动升级隐身级别（nil=默认true）
+	CookieFile           string // Cookie文件路径 (Netscape格式, 用于登录态克隆)
+	Force                bool   // 是否强制删除已有克隆
+	Refresh              bool   // 是否刷新已有页面
 }
 
 // CloneResult wraps the clone package result for external use.
 type CloneResult struct {
-	Success    bool
-	SeedURL    string
-	Host       string
-	OutputDir  string
-	Pages      int
-	Assets     int
-	SizeBytes  int64
-	Duration   string
-	Errors     []string
+	Success            bool
+	SeedURL            string
+	Host               string
+	OutputDir          string
+	Pages              int
+	Assets             int
+	SizeBytes          int64
+	Duration           string
+	Errors             []string
+	DedupFiles         int
+	DedupBytesSaved    int64
+	AntibotDetections  int
+	AntibotStats       string
 }
 
 // extractHost extracts the hostname from a URL.
@@ -321,6 +405,14 @@ func (m *Manager) PackApp(ctx context.Context, appName string, opts PackOptions)
 	packOpts.BaseBinary = opts.BaseBinary
 	packOpts.IconPath = opts.IconPath
 	packOpts.Compress = opts.Compress
+	packOpts.Incremental = opts.Incremental
+	packOpts.Language = opts.Language
+	packOpts.Title = opts.Title
+	packOpts.Date = opts.Date
+	packOpts.Creator = opts.Creator
+	if opts.Description != "" {
+		packOpts.AppDescription = opts.Description
+	}
 
 	// 创建打包器
 	packer := pack.NewPacker(packOpts)
@@ -333,14 +425,16 @@ func (m *Manager) PackApp(ctx context.Context, appName string, opts PackOptions)
 
 	// 转换结果
 	result := &PackResult{
-		Success:       packRes.Success,
-		Format:        string(packRes.Format),
-		OutputPath:    packRes.OutputPath,
-		SizeBytes:     packRes.SizeBytes,
-		Duration:      packRes.Duration.String(),
-		FilesProcessed: packRes.FilesProcessed,
-		AssetsIncluded: packRes.AssetsIncluded,
-		Errors:        packRes.Errors,
+		Success:            packRes.Success,
+		Format:             string(packRes.Format),
+		OutputPath:         packRes.OutputPath,
+		SizeBytes:          packRes.SizeBytes,
+		Duration:           packRes.Duration.String(),
+		FilesProcessed:     packRes.FilesProcessed,
+		AssetsIncluded:     packRes.AssetsIncluded,
+		ClustersReused:     packRes.Stats.ClustersReused,
+		ClustersCompressed: packRes.Stats.ClustersCompressed,
+		Errors:             packRes.Errors,
 	}
 
 	return result, nil
@@ -349,22 +443,30 @@ func (m *Manager) PackApp(ctx context.Context, appName string, opts PackOptions)
 // PackOptions defines options for application packaging.
 type PackOptions struct {
 	Format        string // html | zim | binary | app
-	OutputPath    string // 输出路径
-	BaseBinary    string // 基础可执行文件路径（用于 binary/app 格式）
-	IconPath      string // 图标路径
-	Compress      bool   // 是否压缩
+	OutputPath    string
+	BaseBinary    string
+	IconPath      string
+	Compress      bool
+	Incremental   bool   // 增量 ZIM 打包（复用未变更集群）
+	Language      string // ZIM 语言代码（默认 "eng"）
+	Title         string // ZIM 标题（覆盖自动检测）
+	Description   string
+	Date          string // YYYY-MM-DD
+	Creator       string
 }
 
 // PackResult holds the outcome of a packaging operation.
 type PackResult struct {
-	Success        bool
-	Format         string
-	OutputPath     string
-	SizeBytes      int64
-	Duration       string
-	FilesProcessed int
-	AssetsIncluded int
-	Errors         []string
+	Success            bool
+	Format             string
+	OutputPath         string
+	SizeBytes          int64
+	Duration           string
+	FilesProcessed     int
+	AssetsIncluded     int
+	ClustersReused     int // ZIM 增量：复用集群数
+	ClustersCompressed int // ZIM 增量：压缩集群数
+	Errors             []string
 }
 
 // PreviewServer manages the preview server lifecycle.
@@ -834,6 +936,7 @@ func (m *Manager) loadExisting() {
 		return
 	}
 
+	// Scan for standalone .html files at the top level.
 	for _, entry := range entries {
 		if entry.IsDir() || filepath.Ext(entry.Name()) != ".html" {
 			continue
@@ -852,10 +955,71 @@ func (m *Manager) loadExisting() {
 			CreatedAt: info.ModTime(),
 			UpdatedAt: info.ModTime(),
 			Size:      info.Size(),
-			Type:      AppTypeCustom, // 默认为 custom 类型
+			Type:      AppTypeCustom,
 			Status:    AppStatusActive,
 			Version:   "1.0.0",
 			AppDir:    m.appDir,
+		}
+	}
+
+	// Scan the cloned/ subdirectory for website mirrors.
+	clonedDir := filepath.Join(m.appDir, "cloned")
+	clonedEntries, err := os.ReadDir(clonedDir)
+	if err != nil {
+		return
+	}
+	for _, entry := range clonedEntries {
+		if !entry.IsDir() {
+			continue
+		}
+		clonePath := filepath.Join(clonedDir, entry.Name())
+
+		// Verify it has a pages/ subdirectory (marker of a cloned site).
+		pagesDir := filepath.Join(clonePath, "pages")
+		if _, err := os.Stat(pagesDir); os.IsNotExist(err) {
+			continue
+		}
+
+		// Count stats.
+		var pages, assets int
+		var totalSize int64
+		filepath.Walk(clonePath, func(_ string, fi os.FileInfo, err error) error {
+			if err != nil {
+				return nil
+			}
+			if fi.IsDir() {
+				return nil
+			}
+			totalSize += fi.Size()
+			rel, _ := filepath.Rel(clonePath, fi.Name())
+			// Infer from path prefix; for real accuracy we'd need the manifest.
+			rel = filepath.ToSlash(rel)
+			if strings.HasPrefix(rel, "pages/") || rel == "index.html" {
+				pages++
+			} else {
+				assets++
+			}
+			return nil
+		})
+
+		indexPath := filepath.Join(pagesDir, "index.html")
+		info, _ := entry.Info()
+
+		name := entry.Name()
+		m.apps[name] = AppInfo{
+			Name:        name,
+			Description: fmt.Sprintf("Cloned website mirror for %s", name),
+			FilePath:    indexPath,
+			CreatedAt:   info.ModTime(),
+			UpdatedAt:   info.ModTime(),
+			Size:        totalSize,
+			Type:        AppTypeCloned,
+			Status:      AppStatusActive,
+			Version:     "1.0.0",
+			SourceURL:   "https://" + name,
+			Pages:       pages,
+			Assets:      assets,
+			AppDir:      clonePath,
 		}
 	}
 }

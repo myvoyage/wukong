@@ -18,15 +18,22 @@ import (
 	"time"
 
 	"github.com/chromedp/chromedp"
+	"github.com/km269/wukong/internal/browser/settle"
+	"github.com/km269/wukong/internal/browser/stealth"
 	"github.com/km269/wukong/internal/config"
 )
 
 // Controller provides web content tools with dual backend support.
 // It uses net/http for basic page fetching and chromedp for
 // JavaScript rendering, real screenshots, and page interaction.
+//
+// When cfg.Stealth is true, anti-detection scripts and Chrome flags
+// are applied to reduce bot detectability.
 type Controller struct {
 	cfg            *config.BrowserConfig
 	client         *http.Client
+	settleTimeout  time.Duration // Network-idle settle duration.
+	stealth        bool           // Anti-detection mode enabled.
 	chromedpCtx    context.Context
 	chromedpCancel context.CancelFunc
 	allocCancel    context.CancelFunc // browser process lifecycle
@@ -39,8 +46,12 @@ func NewController(cfg *config.BrowserConfig) *Controller {
 		timeout = cfg.Timeout
 	}
 
+	settle := 1500 * time.Millisecond
+
 	c := &Controller{
-		cfg: cfg,
+		cfg:           cfg,
+		settleTimeout: settle,
+		stealth:       cfg != nil && cfg.Stealth,
 		client: &http.Client{
 			Timeout: timeout,
 		},
@@ -62,7 +73,33 @@ func (c *Controller) initChromedp() {
 		chromedp.Flag("disable-gpu", true),
 		chromedp.Flag("no-sandbox", true),
 		chromedp.Flag("disable-dev-shm-usage", true),
+		chromedp.Flag("disable-extensions", true),
+		chromedp.Flag("disable-background-networking", true),
+		chromedp.Flag("disable-sync", true),
+		chromedp.Flag("mute-audio", true),
 	)
+
+	// Stealth mode: add anti-detection flags and viewport sizing.
+	if c.stealth {
+		opts = append(opts,
+			chromedp.Flag("disable-blink-features", "AutomationControlled"),
+			chromedp.Flag("disable-infobars", true),
+			chromedp.Flag("no-default-browser-check", true),
+			chromedp.Flag("no-first-run", true),
+			chromedp.Flag("disable-component-update", true),
+			chromedp.Flag("window-size", "1920,1080"),
+			chromedp.Flag("disable-breakpad", true),
+			chromedp.Flag("disable-background-timer-throttling", true),
+			chromedp.Flag("disable-renderer-backgrounding", true),
+			chromedp.Flag("disable-field-trial-config", true),
+			chromedp.Flag("force-color-profile", "srgb"),
+		)
+	}
+
+	// Use custom browser path if configured.
+	if c.cfg.BrowserPath != "" {
+		opts = append(opts, chromedp.ExecPath(c.cfg.BrowserPath))
+	}
 
 	allocCtx, allocCancel := chromedp.NewExecAllocator(
 		context.Background(), opts...,
@@ -72,6 +109,43 @@ func (c *Controller) initChromedp() {
 	ctx, cancel := chromedp.NewContext(allocCtx)
 	c.chromedpCtx = ctx
 	c.chromedpCancel = cancel
+
+	// Inject stealth script if enabled.
+	if c.stealth {
+		if err := stealth.Inject(ctx); err != nil {
+			fmt.Fprintf(os.Stderr,
+				"[wukong/browser] stealth injection failed: %v\n", err)
+		} else {
+			fmt.Fprintf(os.Stderr,
+				"[wukong/browser] stealth mode enabled\n")
+		}
+	}
+}
+
+// StealthEnabled reports whether anti-detection scripts are active.
+func (c *Controller) StealthEnabled() bool {
+	return c.stealth
+}
+
+// EnableStealth dynamically injects anti-detection scripts via CDP.
+func (c *Controller) EnableStealth() error {
+	if c.stealth {
+		return nil
+	}
+	if !c.isChromedpMode() {
+		return fmt.Errorf("stealth requires chromedp mode")
+	}
+	if err := stealth.Inject(c.chromedpCtx); err != nil {
+		return fmt.Errorf("enable stealth: %w", err)
+	}
+	c.stealth = true
+	fmt.Fprintf(os.Stderr, "[wukong/browser] stealth dynamically enabled\n")
+	return nil
+}
+
+// waitForSettle delegates to the shared network-idle wait strategy.
+func (c *Controller) waitForSettle(tabCtx context.Context) error {
+	return settle.Wait(tabCtx, c.settleTimeout)
 }
 
 // isChromedpMode returns true if chromedp is available and enabled.
@@ -195,14 +269,22 @@ func (c *Controller) navigateWithChromedp(
 	var title, htmlContent string
 	var statusCode int64
 
+	// Navigate and wait for initial DOM ready.
+	if err := chromedp.Run(cdpCtx, chromedp.Navigate(url)); err != nil {
+		return &NavigateResult{
+			Success: false,
+			URL:     url,
+			Error:   fmt.Sprintf("chromedp navigation: %v", err),
+		}, nil
+	}
+
+	// Wait for network to settle instead of fixed Sleep.
+	c.waitForSettle(cdpCtx)
+
+	// Snapshot the rendered page.
 	err := chromedp.Run(cdpCtx,
-		chromedp.Navigate(url),
-		chromedp.Sleep(2*time.Second), // Wait for JS to render
 		chromedp.Title(&title),
 		chromedp.OuterHTML("html", &htmlContent),
-		chromedp.EvaluateAsDevTools(
-			"document.readyState", nil,
-		),
 	)
 	if err != nil {
 		// Don't fail on context cancellation from timeout
@@ -313,9 +395,18 @@ func (c *Controller) screenshotWithChromedp(
 	var title string
 	var screenshotBuf []byte
 
+	if err := chromedp.Run(cdpCtx, chromedp.Navigate(url)); err != nil {
+		return &ScreenshotResult{
+			Success: false,
+			URL:     url,
+			Error:   fmt.Sprintf("chromedp navigation: %v", err),
+		}, nil
+	}
+
+	// Wait for network to settle.
+	c.waitForSettle(cdpCtx)
+
 	err := chromedp.Run(cdpCtx,
-		chromedp.Navigate(url),
-		chromedp.Sleep(2*time.Second),
 		chromedp.Title(&title),
 		chromedp.FullScreenshot(&screenshotBuf, 90),
 	)
@@ -419,9 +510,17 @@ func (c *Controller) ClickElement(
 	defer cdpCancel()
 
 	var htmlContent string
+	// Navigate and wait for the page to settle.
+	if err := chromedp.Run(cdpCtx, chromedp.Navigate(url)); err != nil {
+		return &ClickResult{
+			Success: false,
+			URL:     url,
+			Error:   fmt.Sprintf("navigate: %v", err),
+		}, nil
+	}
+	c.waitForSettle(cdpCtx)
+
 	err := chromedp.Run(cdpCtx,
-		chromedp.Navigate(url),
-		chromedp.Sleep(2*time.Second),
 		chromedp.WaitVisible(selector, chromedp.ByQuery),
 		chromedp.Click(selector, chromedp.ByQuery),
 		chromedp.Sleep(1*time.Second),
@@ -476,9 +575,17 @@ func (c *Controller) FillForm(
 	cdpCtx, cdpCancel := chromedp.NewContext(c.chromedpCtx)
 	defer cdpCancel()
 
+	// Navigate and wait for page to settle.
+	if err := chromedp.Run(cdpCtx, chromedp.Navigate(url)); err != nil {
+		return &FillResult{
+			Success: false,
+			URL:     url,
+			Error:   fmt.Sprintf("navigate: %v", err),
+		}, nil
+	}
+	c.waitForSettle(cdpCtx)
+
 	err := chromedp.Run(cdpCtx,
-		chromedp.Navigate(url),
-		chromedp.Sleep(2*time.Second),
 		chromedp.WaitVisible(selector, chromedp.ByQuery),
 		chromedp.SendKeys(selector, value, chromedp.ByQuery),
 	)

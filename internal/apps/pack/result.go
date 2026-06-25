@@ -3,6 +3,8 @@ package pack
 
 import (
 	"time"
+
+	"github.com/km269/wukong/pkg/zim"
 )
 
 // Result holds the outcome of a packaging operation.
@@ -27,6 +29,9 @@ type Result struct {
 
 	// AssetsIncluded is the number of assets included.
 	AssetsIncluded int
+
+	// Stats holds incremental packing statistics (ZIM format).
+	Stats zim.PackStats
 
 	// Errors lists any errors encountered during packaging.
 	Errors []string

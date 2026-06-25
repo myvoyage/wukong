@@ -19,37 +19,27 @@ const (
 
 // Options defines configuration for application packaging.
 type Options struct {
-	// Format is the output format for packaging.
-	Format Format
-
-	// OutputPath is the path for the output file or directory.
-	OutputPath string
-
-	// AppName is the name of the application (used for metadata).
-	AppName string
-
-	// AppDescription is the description of the application.
+	Format        Format
+	OutputPath    string
+	AppName       string
 	AppDescription string
-
-	// AppVersion is the version of the application.
-	AppVersion string
-
-	// BaseBinary is the path to the base executable for binary/app formats.
-	// For binary format, this is the viewer executable to embed content into.
-	// For app format, this is the GUI-enabled executable.
-	BaseBinary string
-
-	// IconPath is the path to the application icon.
-	IconPath string
-
-	// Compress enables compression for ZIM format.
-	Compress bool
-
-	// IncludeAssets includes all assets in the package.
+	AppVersion    string
+	BaseBinary    string
+	IconPath      string
+	Compress      bool
 	IncludeAssets bool
+	EmbedFonts    bool
 
-	// EmbedFonts embeds font files in the package.
-	EmbedFonts bool
+	// ZIM metadata (kage-compatible).
+	Language   string // ISO 639-3 language code (default "eng").
+	Creator    string // Archive creator (default "Wukong").
+	Publisher  string // Archive publisher.
+	Date       string // Archive date (YYYY-MM-DD, default today).
+	Title      string // Override title (default from main page <title>).
+
+	// Incremental ZIM packing.
+	Incremental bool   // Reuse unchanged clusters from cache.
+	CachePath   string // Path to .wukongcache file.
 }
 
 // DefaultOptions returns default packaging options.

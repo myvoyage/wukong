@@ -1,18 +1,19 @@
 # =============================================================================
-# Wukong Configuration — 全功能配置模板 v0.9.0
+# Wukong Configuration — v0.1.14 Full Template
 # =============================================================================
-# Go: 1.26 | 文件: 175 .go | 包: 29 | 配置段: 32 | 配置结构体: 39
+# Go: 1.26 | .go: 221 (47 _test.go) | 内部包: 28 | Structs: 42 | Fields: 292
+# CLI: 28 top-level + 55+ sub | Dependencies: 28 direct + 77 indirect
 #
-# 加载优先级（从高到低）:
-#   1. 命令行参数 (--provider, --model, --temperature, --max-tokens, --config)
-#   2. 环境变量 (WUKONG_ 前缀, 如 WUKONG_DEFAULT_PROVIDER)
-#   3. --config CLI 指定的文件
-#   4. 当前目录 ./config.yaml
+# Loading priority (high to low):
+#   1. CLI flags (--provider, --model, --temperature, --max-tokens, --config)
+#   2. Env vars (WUKONG_ prefix, e.g. WUKONG_DEFAULT_PROVIDER)
+#   3. --config CLI-specified file
+#   4. ./config.yaml (current directory)
 #   5. ~/.config/wukong/config.yaml
-#   6. /etc/wukong/config.yaml (非 Windows)
-#   7. 内置默认值
+#   6. /etc/wukong/config.yaml (non-Windows only)
+#   7. Built-in defaults (setDefaults())
 #
-# 环境变量引用语法: ${ENV_VAR} (运行时自动展开)
+# Env var expansion: ${ENV_VAR} resolved at runtime.
 #   api_key: "${OPENAI_API_KEY}"
 # =============================================================================
 
@@ -20,16 +21,16 @@ log_level: "info"
 default_provider: "lmstudio"
 
 # =============================================================================
-# 全局轻量模型 — 后台任务共享的廉价模型
+# Lightweight Model — shared by background tasks
 # =============================================================================
-# 回退链: 子系统.extractor_model → lightweight_model → default_provider
+# Fallback: subsystem.extractor_model → lightweight_model → default_provider
 lightweight_provider: "lmstudio"
 lightweight_model: "gemma-4-e4b-it"
 
 # =============================================================================
-# 1. Providers — AI 模型提供商 (7 种)
+# 1. Providers — AI model providers (7 types)
 # =============================================================================
-# 支持类型: openai | anthropic | google | deepseek | ollama | lmstudio | acp
+# Types: openai | anthropic | google | deepseek | ollama | lmstudio | acp
 providers:
   - name: "openai"
     type: "openai"
@@ -67,62 +68,38 @@ providers:
     model: "acp-default"
 
 # =============================================================================
-# 2. Agent — 核心行为与执行策略 (35+ 字段)
+# 2. Agent — Core behaviour (30 fields)
 # =============================================================================
 agent:
-  # 执行限制
   max_llm_calls: 50
   max_tool_iterations: 30
-  max_run_duration: "300s"
+  max_run_duration: "600s"
   parallel_tools: true
   streaming: true
-
-  # 生成参数
   temperature: 0.7
   max_tokens: 4096
-  # reasoning_effort: "medium"
-
-  # 工具重试 (指数退避)
   tool_retry_enabled: true
   tool_retry_max_attempts: 3
   tool_retry_initial_wait: "1s"
   tool_retry_backoff_factor: 2.0
   enable_post_tool_prompt: true
-
-  # Planner 规划器: builtin | react | ""
-  planner: ""
-
-  # Tool Search 自动工具筛选
+  planner: ""                              # builtin | react | ""
   tool_search_enabled: true
-
-  # Context Compaction 上下文压缩 (两遍)
   context_compaction: true
-
-  # Session Recall 跨会话预加载
   session_recall_enabled: false
-
-  # JSON Repair
   json_repair_enabled: false
-
-  # Todo 任务管理
   todo_tool_enabled: true
   todo_enforcer_enabled: true
-
-  # Agent Tools 子Agent工具
   agent_tools_enabled: false
-
-  # 提示模板
   system_prompt_dir: "~/.config/wukong/prompts/"
-
-  # Recipe 配方子Agent
   # recipe_dir: ".wukong/recipes/"
   # recipe_enabled: true
 
 # =============================================================================
-# 3. Security — 安全策略 (12 字段)
+# 3. Security — multi-layer defence (13 fields)
 # =============================================================================
 security:
-  permission_mode: "smart"          # auto | smart | manual | chat_only
+  permission_mode: "smart"                  # auto | smart | manual | chat_only
   require_approval: false
   malware_scan_enabled: true
   block_dangerous_commands: true
@@ -132,19 +109,19 @@ security:
     - "mkfs."
     - "> /dev/sda"
     - "fork bomb"
-  default_timeout: "30s"
+  default_timeout: "60s"
   max_timeout: "300s"
   allowlist: []
   denylist: []
-  guardrail_enabled: false         # Prompt 注入检测
-  ignore_file_enabled: true        # .wukongignore 文件黑名单
+  guardrail_enabled: false                 # Prompt injection guard
+  ignore_file_enabled: true
   ignore_file: ".wukongignore"
 
 # =============================================================================
-# 4. Session — 会话持久化
+# 4. Session — persistence (9 fields)
 # =============================================================================
 session:
-  backend: "sqlite"               # sqlite | memory | redis
+  backend: "sqlite"                         # sqlite | memory | redis
   db_path: "wukong.db"
   event_limit: 500
   ttl: "0h"
@@ -152,26 +129,22 @@ session:
   summary_trigger: 50
 
 # =============================================================================
-# 5. Memory — 长期记忆 (tRPC Memory)
+# 5. Memory — tRPC Memory (9 fields)
 # =============================================================================
 memory:
   backend: "sqlite"
   db_path: "wukong.db"
   max_memories: 100
-  # AutoExtract 异步 LLM 提取事实
   auto_extract: true
-  extract_timeout: "600s"
+  extract_timeout: "1200s"
   extractor_provider: "lmstudio"
-  # extractor_model: ""
-  # SmartCleanup 容量淘汰: 80%触发 → 60%目标, 70%新鲜度 + 30%长度
-  enable_smart_cleanup: true
+  enable_smart_cleanup: true                # 80% trigger → 60% target
   cleanup_trigger_threshold: 0.8
   cleanup_target_threshold: 0.6
   memory_ttl: "720h"
   extractor_prompt: |
     You are a Memory Manager. Extract concise memories from the conversation.
     Today's date is {current_date}.
-
     <rules>
     1. Atomicity: One fact per memory.
     2. No subject prefix: Never start with "User", "The user", etc.
@@ -183,7 +156,7 @@ memory:
     </rules>
 
 # =============================================================================
-# 6. Todo — 任务追踪
+# 6. Todo — task tracking (5 fields)
 # =============================================================================
 todo:
   backend: "sqlite"
@@ -192,20 +165,17 @@ todo:
   enable_enforcer: true
 
 # =============================================================================
-# 7-11. CortexDB 记忆栈
+# 7-11. CortexDB Memory Stack (5-layer)
 # =============================================================================
-
-# Recall — FTS5 全文搜索
-recall:
+recall:                                     # FTS5 full-text search
   enabled: true
   backend: "sqlite"
   db_path: "wukong.db"
   max_results: 10
   max_messages_per_session: 200
-  search_mode: "fts5"             # fts5 | hybrid
+  search_mode: "fts5"                       # fts5 | hybrid
 
-# CortexDB — HNSW 向量 + 全文搜索
-cortex:
+cortex:                                     # HNSW vector + full-text
   enabled: true
   db_path: "wukong.db"
   max_results: 10
@@ -214,27 +184,24 @@ cortex:
   embedding_api_key: "lmstudio"
   embedding_model: "qwen3-embedding-0.6b-graphql"
 
-# MemoryFlow — 转录记录 + 语义唤醒 (3层上下文)
-memoryflow:
+memoryflow:                                 # Transcription + semantic wake
   enabled: true
   db_path: "wukong.db"
   namespace: "assistant"
-  embedding_dimensions: 0          # 0=自动检测
+  embedding_dimensions: 0                   # 0=auto-detect
 
-# GraphFlow — 知识图谱 (RDF + SPARQL)
-graphflow:
+graphflow:                                  # Knowledge graph (RDF+SPARQL)
   enabled: true
   db_path: "wukong.db"
   max_chars_per_doc: 8000
-  auto_extract: true               # 每轮对话自动提取实体/关系
+  auto_extract: true
 
-# ImportFlow — 结构化数据导入 (DDL → KG)
-importflow:
+importflow:                                 # Structured data import (DDL→KG)
   enabled: true
   db_path: "wukong.db"
 
 # =============================================================================
-# 12. Revision — 上下文窗口管理 (3层压缩)
+# 12. Revision — context window mgmt (10 fields)
 # =============================================================================
 revision:
   enabled: true
@@ -249,21 +216,23 @@ revision:
   trim_ratio: 0.3
 
 # =============================================================================
-# 13. Browser — 浏览器自动化 (Chromedp)
+# 13. Browser — dual-backend browser automation (14 fields)
 # =============================================================================
 browser:
   enabled: true
-  browser_type: "chromium"
+  browser_type: "chromium"                  # chromium | http (no JS)
   headless: true
+  browser_path: ""                          # Chrome path (empty=auto-detect)
+  stealth: false                            # Anti-detection: 13 JS + 11 Chrome flags
   cache_dir: ".wukong/cache"
   max_download_size: 104857600
   timeout: "60s"
   viewport_width: 1280
   viewport_height: 720
-  search_backend: "duckduckgo"     # duckduckgo | searxng | tavily
+  search_backend: "duckduckgo"             # duckduckgo | searxng | tavily
 
 # =============================================================================
-# 14. Visualiser — 图表生成
+# 14-17. Visualiser | Tutorial | TopOfMind | CodeMode
 # =============================================================================
 visualiser:
   enabled: true
@@ -271,51 +240,81 @@ visualiser:
   max_width: 1200
   max_height: 800
 
-# =============================================================================
-# 15. Tutorial — 交互式教程
-# =============================================================================
 tutorial:
   enabled: true
   language: "zh"
 
-# =============================================================================
-# 16. Top of Mind — 持久化指令注入
-# =============================================================================
 top_of_mind:
   enabled: true
   instruction_file: ".wukong/instructions.md"
   max_length: 2000
 
-# =============================================================================
-# 17. Code Mode — goja JavaScript 沙箱 (5层安全)
-# =============================================================================
 code_mode:
   enabled: true
   timeout: "10s"
   max_memory_mb: 128
 
 # =============================================================================
-# 18. Apps — HTML 应用管理
+# 18. Apps — HTML app management + website cloning + ZIM packaging
 # =============================================================================
 apps:
   enabled: true
   app_dir: ".wukong/apps"
 
-# =============================================================================
-# 19. ARD — Agentic Resource Discovery (双向发现)
-# =============================================================================
-# Outbound: 搜索/发现远程 AI Agent 和 MCP Server
-# Inbound:  暴露 Wukong 自身为可发现的 ARD Registry
-# Auto:     MCP 连接和 A2A 远程配置自动注册到目录
-ard:
-  enabled: false                      # 默认关闭, 按需启用
-  registry_url: ""                    # 远程 ARD 注册表 URL (发现别人)
-  catalog_path: ".wukong/ard/catalog.json"
-  publish_enabled: false              # 让自己可被别​人发现
-  # publish_port: 8081                # ARD Registry HTTP 端口
+  clone:                                    # EnhancedCloner engine
+    # Crawl scope
+    max_pages: 0                            # 0=unlimited
+    max_depth: 0                            # 0=unlimited
+    traversal: "bfs"                        # bfs | dfs
+    subdomains: false
+    scope_prefix: ""
+    # Rendering
+    workers: 4
+    asset_workers: 4
+    timeout: 60                             # seconds
+    settle: 1500                            # network-idle settle (ms)
+    scroll: false
+    user_agent: ""                          # empty=use default
+    # Asset policy
+    asset_same_domain: true                 # skip 3rd-party CDN assets
+    max_asset_bytes: 52428800               # 50MB per-asset cap
+    # skip_asset_exts defaults in DefaultSkipAssetExts() — 38 extensions
+    # Compliance
+    respect_robots: true                    # temoto/robotstxt library
+    crawl_delay: 0                          # ms, 0=use robots.txt
+    no_sitemap: false
+    # Optimizations
+    dedup_content: true                     # SHA-256 + hard links
+    mobile_readable: true
+    enable_resume: true                     # state.json atomic write
+    incremental: false                      # ETag/Last-Modified cache
+    cache_max_age: 86400
+    # Anti-detection
+    stealth: false                          # 13 JS + 11 Chrome flags
+    antibot_enabled: true                   # auto-detect + escalate
+    antibot_auto_escalate: true
+    chrome_path: ""                         # empty=auto-detect
+    # Session
+    cookie_file: ""                         # Netscape-format cookie file
+
+  pack:                                     # ZIM / binary / app packaging
+    compress: true                          # zstd code 5, ZIM v6 spec
+    incremental: false                      # cluster cache reuse
+    language: "eng"                         # ISO 639-3
+    creator: "Wukong"
+    format: "html"                          # html | zim | binary | app
 
 # =============================================================================
-# 20. Summon — 子代理委派 + A2A 远程代理
+# 19. ARD — Agentic Resource Discovery (5 fields)
+# =============================================================================
+ard:
+  enabled: false
+  registry_url: ""
+  catalog_path: ".wukong/ard/catalog.json"
+  publish_enabled: false
+
+# =============================================================================
+# 20. Summon — sub-agent delegation + A2A remotes (5 + 13 fields)
 # =============================================================================
 summon:
   enabled: true
@@ -324,7 +323,7 @@ summon:
   a2a_remotes: []
 
 # =============================================================================
-# 21. Skill — Agent Skill 仓库
+# 21. Skill — agent skill repository (4 fields)
 # =============================================================================
 skill:
   enabled: true
@@ -333,7 +332,7 @@ skill:
   max_skills: 20
 
 # =============================================================================
-# 22. Evolution — 技能自进化 (实验性)
+# 22. Evolution — skill self-evolution (10 fields)
 # =============================================================================
 evolution:
   enabled: false
@@ -348,7 +347,7 @@ evolution:
   analysis_timeout: "60s"
 
 # =============================================================================
-# 23. Knowledge — RAG 知识库
+# 23. Knowledge — RAG knowledge base (10 fields)
 # =============================================================================
 knowledge:
   enabled: false
@@ -361,7 +360,7 @@ knowledge:
   search_tool_name: "knowledge_search"
 
 # =============================================================================
-# 24. Workflow — 多模式 Agent 编排 (10 种)
+# 24. Workflow — multi-mode agent orchestration (10 fields)
 # =============================================================================
 workflow:
   mode: "single"
@@ -373,7 +372,7 @@ workflow:
   sub_agents: []
 
 # =============================================================================
-# 25. Dify — Dify AI 平台集成
+# 25. Dify — Dify AI platform integration (6 fields)
 # =============================================================================
 dify:
   enabled: false
@@ -382,33 +381,32 @@ dify:
   timeout: "120s"
 
 # =============================================================================
-# 26. 服务端点 — 4 种协议
+# 26. Service Endpoints — 4 protocols
 # =============================================================================
-
-a2a_server:                         # A2A :9090
+a2a_server:                                 # A2A :9090
   enabled: true
   address: ":9090"
   agent_name: "wukong"
-  agent_description: "Wukong AI Agent - A2A service endpoint"
+  agent_description: "Wukong AI Agent — A2A endpoint"
 
-agui:                               # AG-UI SSE :8080
+agui:                                       # AG-UI SSE :8080
   enabled: true
   address: ":8080"
   path: "/agui"
 
-acp_server:                         # ACP :9091
+acp_server:                                 # ACP :9091
   enabled: true
   address: ":9091"
   path: "/acp"
   enable_streaming: true
 
-acp_mcp:                            # ACP MCP Bridge :3400
+acp_mcp:                                    # ACP MCP Bridge :3400
   enabled: true
   address: ":3400"
   path: "/mcp"
 
 # =============================================================================
-# 27. Eval — 代理评估
+# 27. Eval — agent evaluation (4 fields)
 # =============================================================================
 eval:
   enabled: false
@@ -416,12 +414,17 @@ eval:
   results_path: ".wukong/evals/results.json"
 
 # =============================================================================
-# 28. Extensions — 外部 MCP 扩展 (12 个内置自动注册)
+# 28. Extensions — external MCP extensions (17 fields per entry)
 # =============================================================================
 extensions: []
+  # Example:
+  # - name: "filesystem"
+  #   type: "stdio"
+  #   command: "npx"
+  #   args: ["-y", "@anthropic/mcp-filesystem", "/path"]
 
 # =============================================================================
-# 29-32. Telemetry / Observability / Artifact / Project
+# 29-32. Observability | Artifact | Telemetry | Project
 # =============================================================================
 telemetry:
   enabled: false

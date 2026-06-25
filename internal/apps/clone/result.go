@@ -37,6 +37,18 @@ type Result struct {
 	// Skipped lists URLs that were skipped (out of scope, excluded, etc.).
 	Skipped []string
 
+	// DedupFiles is the number of files saved via content deduplication.
+	DedupFiles int
+
+	// DedupBytesSaved is the total bytes saved via content deduplication.
+	DedupBytesSaved int64
+
+	// AntibotDetections is the number of anti-bot blocking events detected.
+	AntibotDetections int
+
+	// AntibotStats is a diagnostic summary from the anti-bot engine.
+	AntibotStats string
+
 	// StartTime is when the cloning operation began.
 	StartTime time.Time
 

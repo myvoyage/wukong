@@ -68,14 +68,15 @@ const (
 // Codes follow the ZIM v6 specification:
 //
 //	1 = stored (uncompressed)
-//	4 = zstd
+//	4 = xz/LZMA2 (not implemented)
+//	5 = zstd
 type CompressionType uint8
 
 const (
 	// CompressionNone stores cluster data uncompressed.
 	CompressionNone CompressionType = 1
 	// CompressionZstd stores cluster data compressed with zstd.
-	CompressionZstd CompressionType = 4
+	CompressionZstd CompressionType = 5
 )
 
 // ---------------------------------------------------------------------------
@@ -107,7 +108,7 @@ type Header struct {
 type Article struct {
 	Title       string      // Human-readable title
 	URL         string      // Article URL (e.g., "index.html")
-	Namespace   byte        // Namespace character (typically 'A')
+	Namespace   byte        // Namespace character ('C' for content)
 	ArticleType ArticleType // Article type
 	MimeType    string      // MIME type string (e.g., "text/html")
 	Redirect    uint32      // Target article index (for redirects)

@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/km269/wukong/pkg/zim"
 )
 
 // Packer performs application packaging operations.
@@ -92,7 +94,7 @@ func (p *Packer) determineOutputPath(sourceDir string) string {
 }
 
 // packHTML creates a standard HTML directory structure.
-func (p *Packer) packHTML(ctx context.Context, sourceDir, outputPath string) (*Result, error) {
+func (p *Packer) packHTML(_ context.Context, sourceDir, outputPath string) (*Result, error) {
 	result := &Result{
 		Format:   FormatHTML,
 		OutputPath: outputPath,
@@ -192,68 +194,78 @@ func copyFile(src, dst string) error {
 	return os.Chmod(dst, srcInfo.Mode())
 }
 
-// packZIM creates a ZIM archive file (Kiwix compatible).
-// This uses the native ZIM format implementation following the ZIM specification.
-// The ZIM format is the official Wikipedia offline format supported by Kiwix.
-func (p *Packer) packZIM(ctx context.Context, sourceDir, outputPath string) (*Result, error) {
+// packZIM creates a ZIM archive file (Kiwix compatible) with rich metadata.
+// Includes title extraction, icon embedding, counter statistics,
+// and incremental cluster caching.
+func (p *Packer) packZIM(_ context.Context, sourceDir, outputPath string) (*Result, error) {
 	result := &Result{
 		Format:     FormatZIM,
 		OutputPath: outputPath,
 	}
 
-	// Create ZIM packer
 	packer := NewZIMPacker()
 
-	// Walk through directory and add all files as articles
 	var filesProcessed int
 	var assetsIncluded int
+	var mainPageURL string
+	var mainPageTitle string
+	var counterStats = make(map[string]int) // mime → count
+	var iconData []byte                     // 48×48 PNG favicon
 
 	err := filepath.Walk(sourceDir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}
-
 		if info.IsDir() {
 			return nil
 		}
 
-		// Read file content
+		// Skip state files.
+		relPath, _ := filepath.Rel(sourceDir, path)
+		if filepath.Base(relPath) == "state.json" {
+			return nil
+		}
+
 		data, err := os.ReadFile(path)
 		if err != nil {
 			return fmt.Errorf("read file %s: %w", path, err)
 		}
 
-		// Get relative path as URL
-		relPath, err := filepath.Rel(sourceDir, path)
-		if err != nil {
-			return err
-		}
-
-		// Convert to URL format (use / as separator)
 		url := filepath.ToSlash(relPath)
-		title := url
 
-		// 处理 index pages specially
-		if strings.HasSuffix(url, ".html") {
-			baseName := strings.TrimSuffix(url, ".html")
-			if baseName == "index" || baseName == "" {
-				url = "index"
+		// Detect and capture the mirror's main page.
+		if url == "pages/index.html" && mainPageURL == "" {
+			mainPageURL = url
+			if t := htmlTitleOfBytes(data); t != "" {
+				mainPageTitle = t
 			}
 		}
 
-		// Determine MIME type from extension
+		// Determine MIME type and title.
 		mimeType := getMimeType(url)
-
-		// Count assets (non-HTML files)
-		if mimeType != "text/html" {
+		title := url
+		if mimeType == "text/html" {
+			if t := htmlTitleOfBytes(data); t != "" {
+				title = t
+			}
+		} else {
 			assetsIncluded++
 		}
 
-		// Add as ZIM article
+		// Detect 48×48 favicon for ZIM Illustrator metadata.
+		if mimeType == "image/png" && len(data) > 0 {
+			if isPNG48x48(data) && iconData == nil {
+				iconData = make([]byte, len(data))
+				copy(iconData, data)
+			}
+		}
+
+		// Collect counter stats (Kiwix convention: "mime=count;...").
+		counterStats[mimeType]++
+
 		if err := packer.AddArticle(url, title, mimeType, data); err != nil {
 			return fmt.Errorf("add article %s: %w", url, err)
 		}
-
 		filesProcessed++
 		return nil
 	})
@@ -261,15 +273,84 @@ func (p *Packer) packZIM(ctx context.Context, sourceDir, outputPath string) (*Re
 	if err != nil {
 		return nil, fmt.Errorf("walk directory: %w", err)
 	}
-
 	if filesProcessed == 0 {
 		return nil, fmt.Errorf("no files found to pack")
 	}
 
-	// Build the ZIM archive
-	if err := packer.Build(outputPath, p.opts.AppName, p.opts.AppDescription, p.opts.Compress); err != nil {
+	// Main page with W namespace redirect.
+	if mainPageURL != "" {
+		packer.SetMainPage('C', mainPageURL)
+		packer.AddRedirect('W', "mainPage", "Main Page", 'C', mainPageURL)
+	}
+
+	// --- Rich ZIM metadata (kage-compatible). ---
+
+	// Title: custom override > extracted from main page > app name.
+	zimTitle := p.opts.Title
+	if zimTitle == "" {
+		zimTitle = mainPageTitle
+	}
+	if zimTitle == "" {
+		zimTitle = p.opts.AppName
+	}
+
+	// Language: custom > default "eng".
+	lang := p.opts.Language
+	if lang == "" {
+		lang = "eng"
+	}
+
+	// Date: custom > today.
+	date := p.opts.Date
+	if date == "" {
+		date = time.Now().UTC().Format("2006-01-02")
+	}
+
+	// Creator and publisher.
+	creator := p.opts.Creator
+	if creator == "" {
+		creator = "Wukong"
+	}
+	publisher := p.opts.Publisher
+	if publisher == "" {
+		publisher = creator
+	}
+
+	packer.AddMetadata("Title", zimTitle)
+	packer.AddMetadata("Name", p.opts.AppName)
+	packer.AddMetadata("Language", lang)
+	packer.AddMetadata("Description", p.opts.AppDescription)
+	packer.AddMetadata("Creator", creator)
+	packer.AddMetadata("Publisher", publisher)
+	packer.AddMetadata("Date", date)
+	packer.AddMetadata("Scraper", "Wukong "+p.opts.AppVersion)
+
+	// Source: the original URL this was cloned from.
+	if sourceURL := detectSourceURL(sourceDir); sourceURL != "" {
+		packer.AddMetadata("Source", sourceURL)
+	}
+
+	// Counter: "mime=count;..." format (Kiwix standard).
+	packer.AddMetadata("Counter", buildCounterString(counterStats))
+
+	// Embed 48×48 favicon as Illustrator_48x48 metadata.
+	if iconData != nil {
+		packer.AddContent('M', "Illustration_48x48@1",
+			"Illustration 48x48", "image/png", iconData)
+	}
+
+	// Build the ZIM archive.
+	buildOpts := zim.BuildOptions{
+		AppName:        p.opts.AppName,
+		AppDescription: p.opts.AppDescription,
+		Compress:       p.opts.Compress,
+	}
+	stats, err := packer.BuildWithStats(outputPath, buildOpts, p.opts.CachePath, p.opts.Incremental)
+	if err != nil {
 		return nil, fmt.Errorf("build ZIM archive: %w", err)
 	}
+
+	result.Stats = stats
 
 	// Get final file size
 	info, err := os.Stat(outputPath)
@@ -285,17 +366,32 @@ func (p *Packer) packZIM(ctx context.Context, sourceDir, outputPath string) (*Re
 	return result, nil
 }
 
-// packBinary creates a self-contained executable with embedded content.
+// packBinary creates a self-contained executable with ZIM archive embedded.
+// The ZIM content is appended to a copy of the base binary with markers,
+// making it a single-file distribution that can be extracted and served.
 func (p *Packer) packBinary(ctx context.Context, sourceDir, outputPath string) (*Result, error) {
 	result := &Result{
 		Format:     FormatBinary,
 		OutputPath: outputPath,
 	}
 
-	// 检查基础可执行文件是否存在
+	// Build a temporary ZIM archive.
+	tmpZIM := outputPath + ".tmp.zim"
+	zimResult, err := p.packZIM(ctx, sourceDir, tmpZIM)
+	if err != nil {
+		return nil, fmt.Errorf("build embedded ZIM: %w", err)
+	}
+	defer os.Remove(tmpZIM)
+
+	// Read the ZIM data.
+	zimData, err := os.ReadFile(tmpZIM)
+	if err != nil {
+		return nil, fmt.Errorf("read ZIM data: %w", err)
+	}
+
+	// Copy base binary to output path.
 	baseBinary := p.opts.BaseBinary
 	if baseBinary == "" {
-		// 使用当前可执行文件作为基础
 		baseBinary, _ = os.Executable()
 	}
 
@@ -303,102 +399,49 @@ func (p *Packer) packBinary(ctx context.Context, sourceDir, outputPath string) (
 		return nil, fmt.Errorf("base binary not found: %s", baseBinary)
 	}
 
-	// 复制基础可执行文件到输出路径
 	if err := copyFile(baseBinary, outputPath); err != nil {
 		return nil, fmt.Errorf("copy base binary: %w", err)
 	}
 
-	// 打开输出文件以追加内容
+	// Append ZIM marker and data.
 	outFile, err := os.OpenFile(outputPath, os.O_WRONLY|os.O_APPEND, 0755)
 	if err != nil {
 		return nil, fmt.Errorf("open output file: %w", err)
 	}
 	defer outFile.Close()
 
-	// 写入内容分隔标记
-	marker := "\n---WUKONG_APP_CONTENT_BEGIN---\n"
+	// Write ZIM payload marker and size (allows extraction without scanning).
+	marker := fmt.Sprintf(
+		"\n---WUKONG_ZIM_BEGIN:%d:%s:%s:%d---\n",
+		len(zimData),
+		p.opts.AppName,
+		p.opts.AppVersion,
+		zimResult.FilesProcessed,
+	)
 	if _, err := outFile.WriteString(marker); err != nil {
-		return nil, fmt.Errorf("write marker: %w", err)
+		return nil, fmt.Errorf("write ZIM marker: %w", err)
 	}
 
-	// 写入元数据
-	meta := fmt.Sprintf("NAME=%s\nVERSION=%s\nDATE=%s\n",
-		p.opts.AppName, p.opts.AppVersion, time.Now().Format(time.RFC3339))
-	if _, err := outFile.WriteString(meta); err != nil {
-		return nil, fmt.Errorf("write meta: %w", err)
+	// Write ZIM data.
+	if _, err := outFile.Write(zimData); err != nil {
+		return nil, fmt.Errorf("write ZIM data: %w", err)
 	}
 
-	// 写入内容分隔标记结束
-	markerEnd := "---WUKONG_APP_CONTENT_FILES---\n"
-	if _, err := outFile.WriteString(markerEnd); err != nil {
-		return nil, fmt.Errorf("write marker end: %w", err)
-	}
-
-	// 追加所有文件内容
-	filesProcessed := 0
-	assetsIncluded := 0
-	totalSize := int64(0)
-
-	err = filepath.Walk(sourceDir, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-		if info.IsDir() {
-			return nil
-		}
-
-		// 写入文件头
-		relPath, _ := filepath.Rel(sourceDir, path)
-		fileHeader := fmt.Sprintf("FILE:%s:%d\n", relPath, info.Size())
-		if _, err := outFile.WriteString(fileHeader); err != nil {
-			return err
-		}
-
-		// 写入文件内容
-		srcFile, err := os.Open(path)
-		if err != nil {
-			return err
-		}
-		defer srcFile.Close()
-
-		if _, err := io.Copy(outFile, srcFile); err != nil {
-			return err
-		}
-
-		filesProcessed++
-		totalSize += info.Size()
-
-		// 检查是否是资源文件
-		ext := strings.ToLower(filepath.Ext(path))
-		assetExts := []string{".css", ".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico", ".woff", ".woff2", ".ttf"}
-		for _, assetExt := range assetExts {
-			if ext == assetExt {
-				assetsIncluded++
-				break
-			}
-		}
-
-		return nil
-	})
-
-	if err != nil {
-		return nil, fmt.Errorf("append files: %w", err)
-	}
-
-	// 写入结束标记
-	endMarker := "\n---WUKONG_APP_CONTENT_END---\n"
+	// Write end marker.
+	endMarker := "\n---WUKONG_ZIM_END---\n"
 	if _, err := outFile.WriteString(endMarker); err != nil {
 		return nil, fmt.Errorf("write end marker: %w", err)
 	}
 
-	// 获取最终文件大小
+	// Get final file size.
 	outInfo, _ := os.Stat(outputPath)
 	if outInfo != nil {
 		result.SizeBytes = outInfo.Size()
 	}
 
-	result.FilesProcessed = filesProcessed
-	result.AssetsIncluded = assetsIncluded
+	result.FilesProcessed = zimResult.FilesProcessed
+	result.AssetsIncluded = zimResult.AssetsIncluded
+	result.Stats = zimResult.Stats
 	result.Success = true
 
 	return result, nil
@@ -421,7 +464,7 @@ func (p *Packer) packApp(ctx context.Context, sourceDir, outputPath string) (*Re
 }
 
 // packMacApp creates a macOS .app bundle.
-func (p *Packer) packMacApp(ctx context.Context, sourceDir, outputPath string) (*Result, error) {
+func (p *Packer) packMacApp(_ context.Context, sourceDir, outputPath string) (*Result, error) {
 	result := &Result{
 		Format:     FormatApp,
 		OutputPath: outputPath,
@@ -511,7 +554,7 @@ func (p *Packer) packWindowsApp(ctx context.Context, sourceDir, outputPath strin
 }
 
 // packLinuxApp creates a Linux AppDir.
-func (p *Packer) packLinuxApp(ctx context.Context, sourceDir, outputPath string) (*Result, error) {
+func (p *Packer) packLinuxApp(_ context.Context, sourceDir, outputPath string) (*Result, error) {
 	result := &Result{
 		Format:     FormatApp,
 		OutputPath: outputPath,
@@ -641,4 +684,86 @@ func getMimeType(path string) string {
 	default:
 		return "application/octet-stream"
 	}
+}
+
+// htmlTitleOfBytes extracts the <title> text from HTML bytes.
+// Returns empty string if no <title> tag is found.
+func htmlTitleOfBytes(data []byte) string {
+	s := string(data)
+	startTag := strings.ToLower(s)
+	idx := strings.Index(startTag, "<title>")
+	if idx < 0 {
+		idx = strings.Index(startTag, "<title ")
+	}
+	if idx < 0 {
+		return ""
+	}
+
+	// Find the > of the opening tag.
+	gt := strings.Index(s[idx:], ">")
+	if gt < 0 {
+		return ""
+	}
+	start := idx + gt + 1
+
+	// Find </title>.
+	end := strings.Index(strings.ToLower(s[start:]), "</title>")
+	if end < 0 {
+		return ""
+	}
+
+	title := strings.TrimSpace(s[start : start+end])
+	fields := strings.Fields(title)
+	return strings.Join(fields, " ")
+}
+
+// isPNG48x48 checks if PNG bytes represent a 48×48 image.
+func isPNG48x48(data []byte) bool {
+	if len(data) < 24 {
+		return false
+	}
+	// PNG signature: 137 80 78 71 13 10 26 10
+	if data[0] != 137 || data[1] != 80 || data[2] != 78 || data[3] != 71 {
+		return false
+	}
+	// IHDR starts at offset 16; width at 16, height at 20 (big-endian uint32).
+	w := int(data[16])<<24 | int(data[17])<<16 | int(data[18])<<8 | int(data[19])
+	h := int(data[20])<<24 | int(data[21])<<16 | int(data[22])<<8 | int(data[23])
+	return w == 48 && h == 48
+}
+
+// detectSourceURL finds the original source URL by looking for the
+// "Cloned by Wukong from ..." banner comment in the main page.
+func detectSourceURL(sourceDir string) string {
+	indexPath := filepath.Join(sourceDir, "pages", "index.html")
+	data, err := os.ReadFile(indexPath)
+	if err != nil {
+		return ""
+	}
+	s := string(data)
+	// Look for "Cloned by Wukong from <URL> on <date>".
+	const marker = "Cloned by Wukong from "
+	idx := strings.Index(s, marker)
+	if idx < 0 {
+		return ""
+	}
+	start := idx + len(marker)
+	end := strings.Index(s[start:], " on ")
+	if end < 0 {
+		end = strings.Index(s[start:], "-->")
+	}
+	if end < 0 {
+		return ""
+	}
+	return strings.TrimSpace(s[start : start+end])
+}
+
+// buildCounterString builds the Kiwix "Counter" metadata value
+// in "mime=count;..." format.
+func buildCounterString(stats map[string]int) string {
+	var parts []string
+	for mime, count := range stats {
+		parts = append(parts, fmt.Sprintf("%s=%d", mime, count))
+	}
+	return strings.Join(parts, ";")
 }

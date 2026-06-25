@@ -1,6 +1,10 @@
 // Package clone provides website cloning functionality.
 // It renders pages in headless Chrome, extracts static content,
 // downloads assets, and creates offline-ready HTML directories.
+//
+// Deprecated types: The Cloner and Options below are legacy.
+// All new code should use EnhancedCloner and EnhancedClonerOptions
+// from enhanced_cloner.go.
 package clone
 
 import (
@@ -30,6 +34,10 @@ type pendingPage struct {
 }
 
 // Cloner performs website cloning operations.
+//
+// Deprecated: Use EnhancedCloner instead. This legacy Cloner lacks
+// robots.txt compliance, sitemap discovery, content deduplication,
+// CSS rewriting, incremental caching, and resume support.
 type Cloner struct {
 	opts       Options
 	visited    map[string]bool

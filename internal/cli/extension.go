@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+	"gopkg.in/yaml.v3"
 
 	"github.com/km269/wukong/internal/config"
 	"github.com/km269/wukong/internal/extension"
@@ -52,6 +53,7 @@ Examples:
 	cmd.AddCommand(newExtensionEnableCmd())
 	cmd.AddCommand(newExtensionDisableCmd())
 	cmd.AddCommand(newExtensionShowCmd())
+	cmd.AddCommand(newExtensionRemoveCmd())
 
 	return cmd
 }
@@ -479,6 +481,94 @@ func runExtensionShow(cmd *cobra.Command, args []string) error {
 			fmt.Printf("  %s: %s\n", p.Tool, allowed)
 		}
 	}
+
+	return nil
+}
+
+// newExtensionRemoveCmd creates the "extension remove" subcommand.
+func newExtensionRemoveCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:     "remove <name>",
+		Aliases: []string{"rm", "uninstall"},
+		Short:   "Remove an extension from configuration",
+		Long: `Remove a registered extension from the configuration.
+This will disable the extension if active and remove its entry
+from the configuration file.
+
+Examples:
+  wukong extension remove github
+  wukong extension rm my-custom-mcp`,
+		RunE: runExtensionRemove,
+		Args: cobra.ExactArgs(1),
+	}
+	return cmd
+}
+
+func runExtensionRemove(cmd *cobra.Command, args []string) error {
+	name := args[0]
+
+	// Resolve the config file path first
+	resolvedCfg := resolveConfigPath("")
+	if resolvedCfg == "" {
+		return fmt.Errorf(
+			"config file not found — extension removal requires " +
+				"a config.yaml to write changes")
+	}
+
+	// Load configuration
+	loader, err := config.NewLoader("")
+	if err != nil {
+		return fmt.Errorf("load config: %w", err)
+	}
+	wukongCfg, err := loader.Load()
+	if err != nil {
+		return fmt.Errorf("parse config: %w", err)
+	}
+
+	// Check if extension exists
+	extCfg := wukongCfg.FindExtension(name)
+	if extCfg == nil {
+		return fmt.Errorf("extension %q not found in configuration", name)
+	}
+
+	// Initialize extension manager to disable if active
+	extMgr := extension.NewManager(wukongCfg)
+	if err := extMgr.Initialize(context.Background()); err != nil {
+		return fmt.Errorf("init extension manager: %w", err)
+	}
+	defer extMgr.Close()
+
+	// Try to disable if currently active
+	if info, ok := extMgr.GetStatus(name); ok &&
+		info.Status == extension.StatusEnabled {
+		if err := extMgr.DisableExtension(name); err != nil {
+			util.Logger.Warn("failed to disable extension before removal",
+				"name", name, "error", err.Error())
+		} else {
+			fmt.Printf("Extension %q disabled.\n", name)
+		}
+	}
+
+	// Remove from config Extensions list
+	filtered := make([]config.ExtensionConfig, 0, len(wukongCfg.Extensions)-1)
+	for _, ext := range wukongCfg.Extensions {
+		if ext.Name != name {
+			filtered = append(filtered, ext)
+		}
+	}
+	wukongCfg.Extensions = filtered
+
+	// Write updated config back to file
+	data, err := yaml.Marshal(wukongCfg)
+	if err != nil {
+		return fmt.Errorf("marshal updated config: %w", err)
+	}
+	if err := os.WriteFile(resolvedCfg, data, 0644); err != nil {
+		return fmt.Errorf("write config file %q: %w", resolvedCfg, err)
+	}
+
+	fmt.Printf("Extension %q removed from configuration.\n", name)
+	fmt.Printf("Config file updated: %s\n", resolvedCfg)
 
 	return nil
 }

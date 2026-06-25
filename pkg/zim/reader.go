@@ -19,7 +19,7 @@ const maxRedirectHops = 16
 //
 //	r, _ := zim.Open("archive.zim")
 //	defer r.Close()
-//	blob, _ := r.Get('A', "index.html")
+//	blob, _ := r.Get('C', "index.html")
 //	fmt.Println(string(blob.Data))
 type Reader struct {
 	ra     io.ReaderAt
@@ -120,7 +120,7 @@ func NewReader(ra io.ReaderAt, size int64) (*Reader, error) {
 		return nil, fmt.Errorf("zim: inconsistent header offsets")
 	}
 
-	// Read MIME type list.
+	// Read MIME type list (may include 8-byte alignment padding).
 	mimeLen := int(r.hdr.URLPtrPos - r.hdr.MimeListPos)
 	mb := make([]byte, mimeLen)
 	if _, err := ra.ReadAt(mb, int64(r.hdr.MimeListPos)); err != nil {
@@ -263,17 +263,18 @@ func (r *Reader) direntAtIndex(idx uint32) (dirent, error) {
 		return dirent{}, fmt.Errorf("zim: index %d out of range", idx)
 	}
 	start := r.urlPtrs[idx]
-	// Determine the end of this dirent: next URL pointer or first cluster.
+	// Determine the end of this dirent.
 	var end uint64
 	if idx+1 < r.hdr.ArticleCount {
-		end = r.urlPtrs[idx+1]
+		end = r.urlPtrs[idx+1] // end of next URL pointer
 	} else if r.hdr.ClusterCount > 0 {
-		end = r.clusterPtrs[0]
+		end = r.clusterPtrs[0] // start of first cluster
 	} else {
-		end = r.hdr.ChecksumPos
+		end = r.hdr.ChecksumPos // end of file (before MD5)
 	}
 	if start >= end || end > uint64(r.size) {
-		return dirent{}, fmt.Errorf("zim: bad dirent bounds at %d", idx)
+		return dirent{}, fmt.Errorf("zim: bad dirent bounds at %d: start=%d end=%d size=%d",
+			idx, start, end, r.size)
 	}
 	b := make([]byte, end-start)
 	if _, err := r.ra.ReadAt(b, int64(start)); err != nil {

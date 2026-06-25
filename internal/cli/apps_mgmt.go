@@ -1,0 +1,837 @@
+// Package cli provides the "wukong apps" command for HTML application
+// lifecycle management.
+package cli
+
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"text/tabwriter"
+
+	"github.com/spf13/cobra"
+
+	"github.com/km269/wukong/internal/apps"
+	"github.com/km269/wukong/internal/config"
+	"github.com/km269/wukong/internal/util"
+)
+
+// newAppsCmd creates the "wukong apps" command group.
+func newAppsCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "apps",
+		Short: "Manage HTML applications",
+		Long: `Manage HTML applications created by the agent or user.
+Apps can be custom-built, cloned from websites, or imported
+from external sources.
+
+Subcommands:
+  list      List all apps
+  show      Show app details and content preview
+  create    Create a new app or use a template
+  clone     Clone a website as an offline app
+  pack      Package an app into a distributable format
+  delete    Delete an app
+  history   View version history
+  export    Export an app to a single file`,
+	}
+
+	cmd.AddCommand(newAppsListCmd())
+	cmd.AddCommand(newAppsShowCmd())
+	cmd.AddCommand(newAppsCreateCmd())
+	cmd.AddCommand(newAppsCloneCmd())
+	cmd.AddCommand(newAppsPackCmd())
+	cmd.AddCommand(newAppsDeleteCmd())
+	cmd.AddCommand(newAppsHistoryCmd())
+	cmd.AddCommand(newAppsExportCmd())
+
+	return cmd
+}
+
+// ==========================================================================
+// apps list
+// ==========================================================================
+
+func newAppsListCmd() *cobra.Command {
+	var configPath string
+
+	cmd := &cobra.Command{
+		Use:     "list",
+		Aliases: []string{"ls"},
+		Short:   "List all HTML applications",
+		Long: `List all HTML applications managed by wukong,
+including their type, status, size, and last modification.
+
+Examples:
+  wukong apps list
+  wukong apps ls`,
+		RunE: runAppsList,
+	}
+
+	cmd.Flags().StringVarP(
+		&configPath, "config", "c", "",
+		"Path to config file")
+
+	return cmd
+}
+
+func runAppsList(cmd *cobra.Command, args []string) error {
+	configPath, _ := cmd.Flags().GetString("config")
+
+	mgr, cleanup, err := createAppsManager(configPath)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+
+	appsList := mgr.ListApps()
+	if len(appsList) == 0 {
+		fmt.Println("No apps found.")
+		fmt.Println()
+		fmt.Println("Create an app:")
+		fmt.Println("  wukong apps create --name my-app ")
+		fmt.Println("  --description \"My first app\"")
+		fmt.Println()
+		fmt.Println("Or let the agent create apps for you during a session.")
+		return nil
+	}
+
+	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(w, "NAME\tTYPE\tSTATUS\tSIZE\tVERSION\tUPDATED")
+	fmt.Fprintln(w, "───\t───\t───\t───\t───\t───")
+
+	for _, app := range appsList {
+		size := formatSize(app.Size)
+		updated := app.UpdatedAt.Format("2006-01-02 15:04")
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n",
+			app.Name, app.Type, app.Status,
+			size, app.Version, updated)
+	}
+	w.Flush()
+
+	fmt.Printf("\nTotal: %d app(s)\n", len(appsList))
+	fmt.Printf("App directory: %s\n", mgr.GetAppDir())
+	return nil
+}
+
+// ==========================================================================
+// apps show
+// ==========================================================================
+
+func newAppsShowCmd() *cobra.Command {
+	var configPath string
+
+	cmd := &cobra.Command{
+		Use:   "show <app-name>",
+		Short: "Show app details and content preview",
+		Long: `Display detailed information about an app including
+metadata, file location, and a content preview.
+
+Examples:
+  wukong apps show my-app`,
+		RunE: runAppsShow,
+		Args: cobra.ExactArgs(1),
+	}
+
+	cmd.Flags().StringVarP(
+		&configPath, "config", "c", "",
+		"Path to config file")
+
+	return cmd
+}
+
+func runAppsShow(cmd *cobra.Command, args []string) error {
+	name := args[0]
+	configPath, _ := cmd.Flags().GetString("config")
+
+	mgr, cleanup, err := createAppsManager(configPath)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+
+	app, ok := mgr.GetApp(name)
+	if !ok {
+		return fmt.Errorf("app %q not found. Run 'wukong apps list' "+
+			"to see available apps.", name)
+	}
+
+	fmt.Println(strings.Repeat("─", 60))
+	fmt.Printf("  App: %s\n", name)
+	fmt.Println(strings.Repeat("─", 60))
+
+	fmt.Printf("\n  Description: %s\n", app.Description)
+	fmt.Printf("  Type:        %s\n", app.Type)
+	fmt.Printf("  Status:      %s\n", app.Status)
+	fmt.Printf("  Version:     %s\n", app.Version)
+	fmt.Printf("  Size:        %s\n", formatSize(app.Size))
+	fmt.Printf("  Created:     %s\n", app.CreatedAt.Format("2006-01-02 15:04:05"))
+	fmt.Printf("  Updated:     %s\n", app.UpdatedAt.Format("2006-01-02 15:04:05"))
+	fmt.Printf("  File:        %s\n", app.FilePath)
+
+	if app.AppDir != "" {
+		fmt.Printf("  App Dir:     %s\n", app.AppDir)
+	}
+	if app.SourceURL != "" {
+		fmt.Printf("  Source:      %s\n", app.SourceURL)
+	}
+	if app.Pages > 0 {
+		fmt.Printf("  Pages:       %d\n", app.Pages)
+	}
+	if app.Assets > 0 {
+		fmt.Printf("  Assets:      %d\n", app.Assets)
+	}
+
+	// Content preview
+	html, err := mgr.ReadAppHTML(name)
+	if err != nil {
+		fmt.Printf("\n  Content: (read error: %v)\n", err)
+	} else {
+		preview := strings.TrimSpace(html)
+		if len(preview) > 500 {
+			// Find a good cutoff point
+			cutoff := preview[:500]
+			if idx := strings.LastIndex(cutoff, "\n"); idx > 400 {
+				cutoff = cutoff[:idx]
+			}
+			preview = cutoff
+		}
+		fmt.Println("\n  [Content Preview]")
+		fmt.Println("  " + strings.Repeat("─", 56))
+		for _, line := range strings.Split(preview, "\n") {
+			if strings.TrimSpace(line) != "" {
+				fmt.Println("  " + line)
+			}
+		}
+		fmt.Println("  ...")
+	}
+
+	// Version history count
+	versions, _ := mgr.ListVersions(name)
+	if len(versions) > 0 {
+		fmt.Printf("\n  Versions: %d (latest: %s)\n",
+			len(versions), versions[0].Version)
+		fmt.Printf("  Run 'wukong apps history %s' for details.\n", name)
+	}
+
+	fmt.Println()
+	return nil
+}
+
+// ==========================================================================
+// apps create
+// ==========================================================================
+
+func newAppsCreateCmd() *cobra.Command {
+	var (
+		configPath  string
+		appName     string
+		description string
+		template    string
+		htmlFile    string
+	)
+
+	cmd := &cobra.Command{
+		Use:   "create",
+		Short: "Create a new HTML application",
+		Long: `Create a new HTML application from a template, an HTML file,
+or with blank content.
+
+Templates: blank, calculator, dashboard, form, notes
+
+Examples:
+  wukong apps create --name my-app --desc "My app"
+  wukong apps create --name calc --template calculator
+  wukong apps create --name page --html-file ./index.html`,
+		RunE: runAppsCreate,
+	}
+
+	cmd.Flags().StringVarP(
+		&configPath, "config", "c", "",
+		"Path to config file")
+	cmd.Flags().StringVarP(
+		&appName, "name", "n", "",
+		"App name (required)")
+	cmd.Flags().StringVarP(
+		&description, "description", "d", "",
+		"App description")
+	cmd.Flags().StringVarP(
+		&template, "template", "t", "",
+		"Template to use: blank, calculator, dashboard, form, notes")
+	cmd.Flags().StringVarP(
+		&htmlFile, "html-file", "f", "",
+		"Path to HTML file to import")
+
+	return cmd
+}
+
+func runAppsCreate(cmd *cobra.Command, args []string) error {
+	configPath, _ := cmd.Flags().GetString("config")
+	name, _ := cmd.Flags().GetString("name")
+	desc, _ := cmd.Flags().GetString("description")
+	tmpl, _ := cmd.Flags().GetString("template")
+	htmlFile, _ := cmd.Flags().GetString("html-file")
+
+	if name == "" {
+		return fmt.Errorf("--name is required")
+	}
+
+	mgr, cleanup, err := createAppsManager(configPath)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+
+	// Check for duplicate
+	if _, ok := mgr.GetApp(name); ok {
+		return fmt.Errorf("app %q already exists", name)
+	}
+
+	var app apps.AppInfo
+
+	if htmlFile != "" {
+		// Create from file
+		content, err := os.ReadFile(htmlFile)
+		if err != nil {
+			return fmt.Errorf("read html file: %w", err)
+		}
+		app, err = mgr.CreateAppFromImport(name, desc, string(content))
+		if err != nil {
+			return fmt.Errorf("import app: %w", err)
+		}
+		fmt.Printf("App %q imported from %s\n", name, htmlFile)
+	} else if tmpl != "" {
+		// Create from template
+		templateType := apps.TemplateType(tmpl)
+		app, err = mgr.CreateAppWithTemplate(name, desc, templateType)
+		if err != nil {
+			return fmt.Errorf("create from template: %w", err)
+		}
+		fmt.Printf("App %q created from %s template\n", name, tmpl)
+	} else {
+		// Create blank app
+		app, err = mgr.CreateApp(name, desc, "")
+		if err != nil {
+			return fmt.Errorf("create app: %w", err)
+		}
+		fmt.Printf("App %q created\n", name)
+	}
+
+	fmt.Printf("  Type:   %s\n", app.Type)
+	fmt.Printf("  Status: %s\n", app.Status)
+	fmt.Printf("  File:   %s\n", app.FilePath)
+	fmt.Println()
+
+	// List available templates
+	templates := apps.ListTemplates()
+	if len(templates) > 0 {
+		fmt.Println("Available templates for future use:")
+		for _, t := range templates {
+			fmt.Printf("  - %s: %s\n", t.Name, t.Description)
+		}
+	}
+
+	return nil
+}
+
+// ==========================================================================
+// apps delete
+// ==========================================================================
+
+func newAppsDeleteCmd() *cobra.Command {
+	var configPath string
+
+	cmd := &cobra.Command{
+		Use:     "delete <app-name>",
+		Aliases: []string{"rm"},
+		Short:   "Delete an HTML application",
+		Long: `Delete an application and all its files.
+This operation cannot be undone.
+
+Examples:
+  wukong apps delete my-app
+  wukong apps rm my-app`,
+		RunE: runAppsDelete,
+		Args: cobra.ExactArgs(1),
+	}
+
+	cmd.Flags().StringVarP(
+		&configPath, "config", "c", "",
+		"Path to config file")
+
+	return cmd
+}
+
+func runAppsDelete(cmd *cobra.Command, args []string) error {
+	name := args[0]
+	configPath, _ := cmd.Flags().GetString("config")
+
+	mgr, cleanup, err := createAppsManager(configPath)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+
+	if _, ok := mgr.GetApp(name); !ok {
+		return fmt.Errorf("app %q not found", name)
+	}
+
+	if err := mgr.DeleteApp(name); err != nil {
+		return fmt.Errorf("delete app: %w", err)
+	}
+
+	fmt.Printf("App %q deleted.\n", name)
+	return nil
+}
+
+// ==========================================================================
+// apps history
+// ==========================================================================
+
+func newAppsHistoryCmd() *cobra.Command {
+	var configPath string
+
+	cmd := &cobra.Command{
+		Use:   "history <app-name>",
+		Short: "View version history of an app",
+		Long: `Display the version history of an app including
+version numbers, timestamps, sizes, and labels.
+
+Examples:
+  wukong apps history my-app`,
+		RunE: runAppsHistory,
+		Args: cobra.ExactArgs(1),
+	}
+
+	cmd.Flags().StringVarP(
+		&configPath, "config", "c", "",
+		"Path to config file")
+
+	return cmd
+}
+
+func runAppsHistory(cmd *cobra.Command, args []string) error {
+	name := args[0]
+	configPath, _ := cmd.Flags().GetString("config")
+
+	mgr, cleanup, err := createAppsManager(configPath)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+
+	if _, ok := mgr.GetApp(name); !ok {
+		return fmt.Errorf("app %q not found", name)
+	}
+
+	versions, err := mgr.ListVersions(name)
+	if err != nil {
+		return fmt.Errorf("list versions: %w", err)
+	}
+
+	if len(versions) == 0 {
+		fmt.Println("No version history for this app.")
+		return nil
+	}
+
+	fmt.Printf("Version history for %s (%d versions):\n\n", name, len(versions))
+	fmt.Printf("  %-10s %-20s %-10s %s\n",
+		"VERSION", "TIMESTAMP", "SIZE", "LABEL")
+	fmt.Println("  " + strings.Repeat("─", 55))
+
+	for _, v := range versions {
+		label := v.Label
+		if label == "" {
+			label = "-"
+		}
+		fmt.Printf("  %-10s %-20s %-10s %s\n",
+			v.Version,
+			v.Timestamp.Format("2006-01-02 15:04:05"),
+			formatSize(v.Size),
+			label)
+	}
+
+	fmt.Printf("\nMax history: %d versions per app\n", 20)
+	return nil
+}
+
+// ==========================================================================
+// apps export
+// ==========================================================================
+
+func newAppsExportCmd() *cobra.Command {
+	var (
+		configPath string
+		outputDir  string
+	)
+
+	cmd := &cobra.Command{
+		Use:   "export <app-name>",
+		Short: "Export an app to a single HTML file",
+		Long: `Export an application as a self-contained HTML file
+suitable for sharing or deployment.
+
+Examples:
+  wukong apps export my-app
+  wukong apps export my-app --output ./exports/`,
+		RunE: runAppsExport,
+		Args: cobra.ExactArgs(1),
+	}
+
+	cmd.Flags().StringVarP(
+		&configPath, "config", "c", "",
+		"Path to config file")
+	cmd.Flags().StringVarP(
+		&outputDir, "output", "o", "",
+		"Output directory (default: current directory)")
+
+	return cmd
+}
+
+func runAppsExport(cmd *cobra.Command, args []string) error {
+	name := args[0]
+	configPath, _ := cmd.Flags().GetString("config")
+	outputDir, _ := cmd.Flags().GetString("output")
+
+	if outputDir == "" {
+		outputDir = "."
+	}
+
+	mgr, cleanup, err := createAppsManager(configPath)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+
+	if _, ok := mgr.GetApp(name); !ok {
+		return fmt.Errorf("app %q not found", name)
+	}
+
+	outputPath := filepath.Join(outputDir, name+".html")
+	result, err := mgr.ExportApp(name, outputPath)
+	if err != nil {
+		return fmt.Errorf("export app: %w", err)
+	}
+
+	fmt.Printf("App %q exported to: %s\n", name, result.OutputPath)
+	fmt.Printf("  Size: %s\n", formatSize(result.Size))
+	fmt.Println()
+	return nil
+}
+
+// ==========================================================================
+// helpers
+// ==========================================================================
+
+// createAppsManager creates an apps manager for CLI use.
+func createAppsManager(configPath string) (*apps.Manager, func(), error) {
+	loader, err := config.NewLoader(configPath)
+	if err != nil {
+		return nil, nil, fmt.Errorf("load config: %w", err)
+	}
+	wukongCfg, err := loader.Load()
+	if err != nil {
+		return nil, nil, fmt.Errorf("parse config: %w", err)
+	}
+
+	if !wukongCfg.Apps.Enabled {
+		return nil, nil, fmt.Errorf(
+			"apps subsystem is disabled. Enable it in config.yaml:\n" +
+				"  apps:\n" +
+				"    enabled: true\n" +
+				"    app_dir: .wukong/apps")
+	}
+
+	mgr, err := apps.NewManager(&wukongCfg.Apps)
+	if err != nil {
+		return nil, nil, fmt.Errorf("create apps manager: %w", err)
+	}
+
+	cleanup := func() {
+		// Manager has no Close, but we can do any needed cleanup here
+	}
+	return mgr, cleanup, nil
+}
+
+// formatSize formats a byte size for display.
+func formatSize(size int64) string {
+	const unit = 1024
+	if size < unit {
+		return fmt.Sprintf("%d B", size)
+	}
+	div, exp := int64(unit), 0
+	for n := size / unit; n >= unit; n /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %cB", float64(size)/float64(div), "KMGTPE"[exp])
+}
+
+// ==========================================================================
+// apps pack
+// ==========================================================================
+
+func newAppsPackCmd() *cobra.Command {
+	var (
+		configPath  string
+		format      string
+		outputPath  string
+		baseBinary  string
+		iconPath    string
+		compress    bool
+		incremental bool
+		language    string
+		title       string
+		description string
+		date        string
+		creator     string
+	)
+
+	cmd := &cobra.Command{
+		Use:   "pack <app-name>",
+		Short: "Package an app into a distributable format",
+		Long: `Package an application into a distributable format:
+  html   – Self-contained HTML directory
+  zim    – ZIM archive (Kiwix compatible, offline reader)
+  binary – Standalone executable with embedded content
+  app    – Desktop application bundle (.app / .AppDir / .exe)
+
+ZIM archives include rich metadata (title, language, date, source)
+and support incremental builds (--incremental) for fast repacks.
+
+Examples:
+  wukong apps pack v5.monibuca.com --format zim
+  wukong apps pack my-site -f zim --incremental --title "My Site"
+  wukong apps pack my-site -f binary -o ./dist/my-site
+  wukong apps pack my-site -f zim --language zho --date 2026-06-24`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			appName := args[0]
+			cfgPath, _ := cmd.Flags().GetString("config")
+
+			mgr, cleanup, err := createAppsManager(cfgPath)
+			if err != nil {
+				return err
+			}
+			defer cleanup()
+
+			fmt.Printf("Packaging %q as %s ...\n", appName, format)
+
+			opts := apps.PackOptions{
+				Format:      format,
+				OutputPath:  outputPath,
+				BaseBinary:  baseBinary,
+				IconPath:    iconPath,
+				Compress:    compress,
+				Incremental: incremental,
+				Language:    language,
+				Title:       title,
+				Description: description,
+				Date:        date,
+				Creator:     creator,
+			}
+
+			result, err := mgr.PackApp(cmd.Context(), appName, opts)
+			if err != nil {
+				return fmt.Errorf("pack: %w", err)
+			}
+
+			fmt.Printf("\nPack complete!\n")
+			fmt.Printf("  Format:    %s\n", result.Format)
+			fmt.Printf("  Output:    %s\n", result.OutputPath)
+			fmt.Printf("  Size:      %s\n", formatSize(result.SizeBytes))
+			fmt.Printf("  Duration:  %s\n", result.Duration)
+			fmt.Printf("  Files:     %d\n", result.FilesProcessed)
+			fmt.Printf("  Assets:    %d\n", result.AssetsIncluded)
+			if result.ClustersReused > 0 || result.ClustersCompressed > 0 {
+				fmt.Printf("  Cache:     %d clusters reused, %d compressed\n",
+					result.ClustersReused, result.ClustersCompressed)
+			}
+			return nil
+		},
+	}
+
+	cmd.Flags().StringVarP(&configPath, "config", "c", "", "Path to config file")
+	cmd.Flags().StringVarP(&format, "format", "f", "zim",
+		"Output format: html | zim | binary | app")
+	cmd.Flags().StringVarP(&outputPath, "output", "o", "",
+		"Output file path (auto-generated if empty)")
+	cmd.Flags().StringVar(&baseBinary, "base-binary", "",
+		"Base executable for binary/app format")
+	cmd.Flags().StringVar(&iconPath, "icon", "",
+		"Icon file path for app format")
+	cmd.Flags().BoolVar(&compress, "compress", false,
+		"Enable compression (zstd for ZIM)")
+	cmd.Flags().BoolVar(&incremental, "incremental", false,
+		"Incremental ZIM build (reuse unchanged clusters)")
+	cmd.Flags().StringVar(&language, "language", "",
+		"ZIM language code (ISO 639-3, default: eng)")
+	cmd.Flags().StringVar(&title, "title", "",
+		"ZIM title (auto-detected from main page if empty)")
+	cmd.Flags().StringVar(&description, "description", "",
+		"ZIM description")
+	cmd.Flags().StringVar(&date, "date", "",
+		"ZIM date YYYY-MM-DD (default: today)")
+	cmd.Flags().StringVar(&creator, "creator", "",
+		"ZIM creator (default: Wukong)")
+
+	return cmd
+}
+
+// Ensure util is used.
+var _ = util.Logger
+
+// ==========================================================================
+// apps clone
+// ==========================================================================
+
+func newAppsCloneCmd() *cobra.Command {
+	var (
+		configPath          string
+		maxPages            int
+		maxDepth            int
+		traversal           string
+		subdomains          bool
+		scroll              bool
+		timeout             int
+		settle              int
+		workers             int
+		assetWorkers        int
+		force               bool
+		refresh             bool
+		incremental         bool
+		chromePath          string
+		stealth             bool
+		assetSameDomain     bool
+		noSitemap           bool
+		noAntibot           bool
+		noAntibotAutoEsc    bool
+		cookieFile          string
+	)
+
+	cmd := &cobra.Command{
+		Use:   "clone <url>",
+		Short: "Clone a website as an offline app",
+		Long: `Clone a website to a local directory with all JavaScript stripped out.
+Uses headless Chrome to render pages, downloads all assets,
+and creates a fully offline-browsable mirror.
+
+Examples:
+  wukong apps clone https://example.com
+  wukong apps clone example.com --max-pages 50 --max-depth 2
+  wukong apps clone example.com --subdomains --scroll
+  wukong apps clone example.com --workers 8 --incremental
+  wukong apps clone example.com --stealth --traversal dfs`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			seedURL := args[0]
+			cfgPath, _ := cmd.Flags().GetString("config")
+
+			mgr, cleanup, err := createAppsManager(cfgPath)
+			if err != nil {
+				return err
+			}
+			defer cleanup()
+
+			fmt.Printf("Cloning %s ...\n", seedURL)
+
+			opts := apps.CloneOptions{
+				MaxPages:     maxPages,
+				MaxDepth:     maxDepth,
+				Traversal:    traversal,
+				Subdomains:   subdomains,
+				Scroll:       scroll,
+				Timeout:      timeout,
+				Settle:       settle,
+				Workers:      workers,
+				AssetWorkers: assetWorkers,
+				Force:        force,
+				Refresh:      refresh,
+				ChromePath:   chromePath,
+				CookieFile:   cookieFile,
+			}
+			if incremental {
+				v := true
+				opts.Incremental = &v
+			}
+			if stealth {
+				v := true
+				opts.Stealth = &v
+			}
+			if noAntibot {
+				v := false
+				opts.AntibotEnabled = &v
+			}
+			if noAntibotAutoEsc {
+				v := false
+				opts.AntibotAutoEscalate = &v
+			}
+
+			// Respect flags default (non-flag bools are false by default, meaning
+			// nil pointer will use defaults in EnhancedCloner which are true).
+			app, result, err := mgr.CloneApp(cmd.Context(), seedURL, opts)
+			if err != nil {
+				return fmt.Errorf("clone: %w", err)
+			}
+
+			fmt.Printf("\nClone complete!\n")
+			fmt.Printf("  App:      %s\n", app.Name)
+			fmt.Printf("  Source:   %s\n", app.SourceURL)
+			fmt.Printf("  Pages:    %d\n", result.Pages)
+			fmt.Printf("  Assets:   %d\n", result.Assets)
+			fmt.Printf("  Size:     %s\n", formatSize(result.SizeBytes))
+			fmt.Printf("  Duration: %s\n", result.Duration)
+			if result.DedupFiles > 0 {
+				fmt.Printf("  Dedup:    %d files, %s saved\n",
+					result.DedupFiles, formatSize(result.DedupBytesSaved))
+			}
+			if result.AntibotDetections > 0 {
+				fmt.Printf("  Antibot:  %d blocking events detected\n",
+					result.AntibotDetections)
+			}
+			fmt.Printf("  Output:   %s\n", result.OutputDir)
+
+			if len(result.Errors) > 0 {
+				fmt.Printf("\nErrors (%d):\n", len(result.Errors))
+				hasTimeout := false
+				for _, e := range result.Errors {
+					fmt.Printf("  - %s\n", e)
+					if strings.Contains(e, "deadline exceeded") ||
+						strings.Contains(e, "timeout") {
+						hasTimeout = true
+					}
+				}
+				if hasTimeout {
+					fmt.Printf("\nHint: slow site? Try a longer timeout:\n"+
+						"  wukong apps clone %s --timeout 120\n",
+						seedURL)
+				}
+			}
+
+			return nil
+		},
+	}
+
+	cmd.Flags().StringVarP(&configPath, "config", "c", "", "Path to config file")
+	cmd.Flags().IntVarP(&maxPages, "max-pages", "p", 0, "Maximum pages to clone (0 = unlimited)")
+	cmd.Flags().IntVarP(&maxDepth, "max-depth", "d", 0, "Maximum link depth (0 = unlimited)")
+	cmd.Flags().StringVar(&traversal, "traversal", "", "Traversal strategy: bfs (default) or dfs")
+	cmd.Flags().BoolVar(&subdomains, "subdomains", false, "Include subdomains")
+	cmd.Flags().BoolVar(&scroll, "scroll", false, "Auto-scroll to trigger lazy loading")
+	cmd.Flags().IntVar(&timeout, "timeout", 0, "Page render timeout in seconds (default 60)")
+	cmd.Flags().IntVar(&settle, "settle", 0, "Network idle settle time in ms (default 1500)")
+	cmd.Flags().IntVarP(&workers, "workers", "w", 0, "Concurrent page renderers (default 4)")
+	cmd.Flags().IntVar(&assetWorkers, "asset-workers", 0, "Concurrent asset downloaders (default same as workers)")
+	cmd.Flags().BoolVar(&force, "force", false, "Delete existing clone and start fresh")
+	cmd.Flags().BoolVar(&refresh, "refresh", false, "Re-render all pages")
+	cmd.Flags().BoolVar(&incremental, "incremental", false, "Use ETag/Last-Modified for incremental updates")
+	cmd.Flags().BoolVar(&assetSameDomain, "asset-same-domain", false, "Only download assets from same domain")
+	cmd.Flags().BoolVar(&noSitemap, "no-sitemap", false, "Disable sitemap URL discovery")
+	cmd.Flags().StringVar(&chromePath, "chrome-path", "", "Path to Chrome/Chromium executable")
+	cmd.Flags().BoolVar(&stealth, "stealth", false, "Enable stealth mode (hide automation from anti-bot detection)")
+	cmd.Flags().BoolVar(&noAntibot, "no-antibot", false, "Disable auto anti-bot detection and escalation")
+	cmd.Flags().BoolVar(&noAntibotAutoEsc, "no-antibot-auto", false, "Detect blocks but skip auto-escalation")
+	cmd.Flags().StringVar(&cookieFile, "cookies", "", "Netscape-format cookie file for authenticated cloning")
+
+	return cmd
+}

@@ -397,39 +397,61 @@ func (ts *AppsToolSet) importApp(
 
 // AppCloneReq is the input for cloning a website.
 type AppCloneReq struct {
-	URL        string `json:"url" jsonschema:"description=要克隆的网站 URL"`
-	MaxPages   int    `json:"max_pages,omitempty" jsonschema:"description=最大页面数量（0=无限制）"`
-	MaxDepth   int    `json:"max_depth,omitempty" jsonschema:"description=最大链接深度（0=无限制）"`
-	Subdomains bool   `json:"subdomains,omitempty" jsonschema:"description=是否包含子域名"`
-	Scroll     bool   `json:"scroll,omitempty" jsonschema:"description=是否滚动加载懒加载内容"`
-	Timeout    int    `json:"timeout,omitempty" jsonschema:"description=页面渲染超时秒数"`
-	Workers    int    `json:"workers,omitempty" jsonschema:"description=并发工作线程数"`
+	URL             string `json:"url" jsonschema:"description=要克隆的网站 URL"`
+	MaxPages        int    `json:"max_pages,omitempty" jsonschema:"description=最大页面数量（0=无限制）"`
+	MaxDepth        int    `json:"max_depth,omitempty" jsonschema:"description=最大链接深度（0=无限制）"`
+	Traversal       string `json:"traversal,omitempty" jsonschema:"description=遍历策略 bfs/dfs（默认bfs）"`
+	Subdomains      bool   `json:"subdomains,omitempty" jsonschema:"description=是否包含子域名"`
+	Scroll          bool   `json:"scroll,omitempty" jsonschema:"description=是否滚动加载懒加载内容"`
+	Timeout         int    `json:"timeout,omitempty" jsonschema:"description=页面渲染超时秒数"`
+	Settle          int    `json:"settle,omitempty" jsonschema:"description=网络空闲等待毫秒数（默认1500）"`
+	Workers         int    `json:"workers,omitempty" jsonschema:"description=并发页面渲染数"`
+	AssetWorkers    int    `json:"asset_workers,omitempty" jsonschema:"description=并发资源下载数"`
+	Force           bool   `json:"force,omitempty" jsonschema:"description=强制删除已有克隆"`
+	Refresh         bool   `json:"refresh,omitempty" jsonschema:"description=刷新已有页面"`
+	Incremental     bool   `json:"incremental,omitempty" jsonschema:"description=启用增量缓存（ETag/Last-Modified）"`
+	AssetSameDomain bool   `json:"asset_same_domain,omitempty" jsonschema:"description=仅下载同域资产"`
 }
 
 // AppCloneRsp is the output for cloning a website.
 type AppCloneRsp struct {
-	Success   bool   `json:"success"`
-	Host      string `json:"host,omitempty"`
-	OutputDir string `json:"output_dir,omitempty"`
-	Pages     int    `json:"pages,omitempty"`
-	Assets    int    `json:"assets,omitempty"`
-	SizeBytes int64  `json:"size_bytes,omitempty"`
-	Duration  string `json:"duration,omitempty"`
-	Message   string `json:"message,omitempty"`
-	Error     string `json:"error,omitempty"`
-	Errors    []string `json:"errors,omitempty"`
+	Success         bool     `json:"success"`
+	Host            string   `json:"host,omitempty"`
+	OutputDir       string   `json:"output_dir,omitempty"`
+	Pages           int      `json:"pages,omitempty"`
+	Assets          int      `json:"assets,omitempty"`
+	SizeBytes       int64    `json:"size_bytes,omitempty"`
+	DedupFiles      int      `json:"dedup_files,omitempty"`
+	DedupBytesSaved int64    `json:"dedup_bytes_saved,omitempty"`
+	Duration        string   `json:"duration,omitempty"`
+	Message         string   `json:"message,omitempty"`
+	Error           string   `json:"error,omitempty"`
+	Errors          []string `json:"errors,omitempty"`
 }
 
 func (ts *AppsToolSet) cloneApp(
 	ctx context.Context, req AppCloneReq,
 ) (AppCloneRsp, error) {
 	opts := apps.CloneOptions{
-		MaxPages:   req.MaxPages,
-		MaxDepth:   req.MaxDepth,
-		Subdomains: req.Subdomains,
-		Scroll:     req.Scroll,
-		Timeout:    req.Timeout,
-		Workers:    req.Workers,
+		MaxPages:     req.MaxPages,
+		MaxDepth:     req.MaxDepth,
+		Traversal:    req.Traversal,
+		Subdomains:   req.Subdomains,
+		Scroll:       req.Scroll,
+		Timeout:      req.Timeout,
+		Settle:       req.Settle,
+		Workers:      req.Workers,
+		AssetWorkers: req.AssetWorkers,
+		Force:        req.Force,
+		Refresh:      req.Refresh,
+	}
+	if req.Incremental {
+		v := true
+		opts.Incremental = &v
+	}
+	if req.AssetSameDomain {
+		v := true
+		opts.AssetSameDomain = &v
 	}
 
 	app, result, err := ts.mgr.CloneApp(ctx, req.URL, opts)
@@ -441,16 +463,31 @@ func (ts *AppsToolSet) cloneApp(
 	}
 
 	return AppCloneRsp{
-		Success:   result.Success,
-		Host:      result.Host,
-		OutputDir: result.OutputDir,
-		Pages:     result.Pages,
-		Assets:    result.Assets,
-		SizeBytes: result.SizeBytes,
-		Duration:  result.Duration,
-		Message:   fmt.Sprintf("网站 %s 已克隆，共 %d 页面，%d 资源，保存于 %s", app.SourceURL, app.Pages, app.Assets, app.AppDir),
-		Errors:    result.Errors,
+		Success:         result.Success,
+		Host:            result.Host,
+		OutputDir:       result.OutputDir,
+		Pages:           result.Pages,
+		Assets:          result.Assets,
+		SizeBytes:       result.SizeBytes,
+		DedupFiles:      result.DedupFiles,
+		DedupBytesSaved: result.DedupBytesSaved,
+		Duration:        result.Duration,
+		Message:         fmt.Sprintf("网站 %s 已克隆，共 %d 页面，%d 资源，去重 %d 文件（节省 %s），保存于 %s", app.SourceURL, app.Pages, app.Assets, result.DedupFiles, formatBytes(result.DedupBytesSaved), app.AppDir),
+		Errors:          result.Errors,
 	}, nil
+}
+
+func formatBytes(n int64) string {
+	if n == 0 {
+		return "0B"
+	}
+	if n < 1024 {
+		return fmt.Sprintf("%dB", n)
+	}
+	if n < 1048576 {
+		return fmt.Sprintf("%.1fKB", float64(n)/1024)
+	}
+	return fmt.Sprintf("%.1fMB", float64(n)/1048576)
 }
 
 // AppPackReq is the input for packing an app.

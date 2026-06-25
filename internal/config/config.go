@@ -706,6 +706,11 @@ type BrowserConfig struct {
 	ViewportWidth int `mapstructure:"viewport_width"`
 	// ViewportHeight sets the browser viewport height in pixels.
 	ViewportHeight int `mapstructure:"viewport_height"`
+	// Stealth enables anti-detection mode: injects scripts to hide
+	// automation indicators (navigator.webdriver, plugins, WebGL, etc.)
+	// from bot-detection libraries. Adds --disable-blink-features
+	// and other flags for a realistic browser fingerprint.
+	Stealth bool `mapstructure:"stealth"`
 	// SearchBackend is the web search engine: duckduckgo (default),
 	// searxng (URL required), tavily (API key required).
 	SearchBackend string `mapstructure:"search_backend"`
@@ -764,6 +769,21 @@ type AppsConfig struct {
 	Enabled bool `mapstructure:"enabled"`
 	// AppDir is the storage directory for app HTML files.
 	AppDir string `mapstructure:"app_dir"`
+	// Clone defines defaults for website cloning.
+	Clone CloneDefaults `mapstructure:"clone"`
+}
+
+// CloneDefaults holds default values for website cloning operations.
+type CloneDefaults struct {
+	Workers        int  `mapstructure:"workers"`
+	AssetWorkers   int  `mapstructure:"asset_workers"`
+	Timeout        int  `mapstructure:"timeout"`
+	RespectRobots  bool `mapstructure:"respect_robots"`
+	DedupContent   bool `mapstructure:"dedup_content"`
+	MobileReadable bool `mapstructure:"mobile_readable"`
+	EnableResume   bool `mapstructure:"enable_resume"`
+	Incremental    bool `mapstructure:"incremental"`
+	CacheMaxAge    int  `mapstructure:"cache_max_age"`
 }
 
 // ARDConfig defines Agentic Resource Discovery settings for finding

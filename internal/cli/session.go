@@ -56,12 +56,18 @@ func newSessionCmd() *cobra.Command {
 		Long: `Start an interactive session with the AI agent.
 The agent can call tools, browse the web, execute commands,
 and complete tasks autonomously.
+
+Subcommands:
+  list    List all saved sessions
+  delete  Delete a session by ID
 		
 Examples:
   wukong session
   wukong session --provider openai
   wukong session --model gpt-4o
-  wukong session --session-id resume-123`,
+  wukong session --session-id resume-123
+  wukong session list
+  wukong session delete abc12345`,
 		RunE: runSession,
 	}
 
@@ -79,6 +85,12 @@ Examples:
 		"Maximum output tokens per LLM call (overrides config)")
 	cmd.Flags().Bool("no-stream", false,
 		"Disable streaming output")
+
+	cmd.AddCommand(newSessionListCmd())
+	cmd.AddCommand(newSessionDeleteCmd())
+	cmd.AddCommand(newSessionExportCmd())
+	cmd.AddCommand(newSessionInfoCmd())
+	cmd.AddCommand(newSessionResumeCmd())
 
 	return cmd
 }
