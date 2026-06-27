@@ -1,6 +1,7 @@
 # Wukong 系统架构
 
-> **Go**: 1.26 | **文件**: 212 `.go` (47 `_test.go`) | **内部包**: 28 | **CLI**: 28 顶层 + 55+ 子命令
+> **Go**: 1.26 | **文件**: 221 `.go` (51 `_test.go`) | **内部包**: 28 | **Config**: 43 结构体 · ~310 字段
+> **CLI**: 28 顶层 + 55+ 子命令 | **依赖**: 29 direct + 105 indirect | **Clone**: 32 EnhancedClonerOptions 字段 · 18 文件
 >
 > 基于 [tRPC-Agent-Go v1.10.0](https://github.com/trpc-group/trpc-agent-go) · [tRPC-MCP-Go v0.0.16](https://github.com/trpc-group/trpc-mcp-go) · [CortexDB v2.25.0](https://github.com/liliang-cn/cortexdb)
 
@@ -63,8 +64,9 @@
 | `internal/cli/tui/` | 3 | 终端 UI (Bubble Tea) |
 | `internal/agent/` | 21 | Agent 循环、Recipe、工作流、HITL |
 | `internal/apps/` | 3 | 应用管理器、版本历史 |
-| `internal/apps/clone/` | 14 | **网站克隆引擎** (Chromedp + Kage 参考) |
+| `internal/apps/clone/` | 18 | **网站克隆引擎** (Chromedp + Stealth + Antibot) |
 | `internal/apps/browser/` | 2 | 无头 Chrome 浏览器池 |
+| `internal/browser/` | 2 + 8 sub | 通用浏览器控制 + Stealth + Antibot + Settle |
 | `internal/apps/pack/` | 4 | 多格式打包 (HTML/ZIM/Binary/App) |
 | `internal/apps/sanitize/` | 3 | DOM 级 HTML 安全清理 |
 | `internal/apps/mcpapps/` | 4 | MCP Apps 协议桥接 |
@@ -333,5 +335,5 @@ wukong
 | 12 | ARD 双向发现 | 联邦搜索 + RegistryServer |
 | 13 | Evolution 版本管理 | 每补丁保留版本 |
 | 14 | 单文件 wukong.db | 简化部署 |
-| 15 | Kage 参考克隆引擎 | Chrome真实渲染 + 资源本地化 + ZIM打包 |
+| 15 | Chrome 真实渲染克隆引擎 | Chrome渲染 + 资源本地化 + ZIM打包 + 反反爬 |
 | 16 | 浏览器标签池复用 | 单进程多Tab，信号量控制并发 |

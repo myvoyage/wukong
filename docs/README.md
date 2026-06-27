@@ -1,6 +1,6 @@
 # Wukong — 架构哲学与核心特性
 
-> **版本**: v0.1.13 | **Go**: 1.26 | **文件**: 175 `.go` (42 `_test.go`) | **包**: 28 | **许可证**: GNU AGPL-3.0
+> **版本**: v0.1.15 | **Go**: 1.26 | **文件**: 175 `.go` (42 `_test.go`) | **包**: 28 | **许可证**: GNU AGPL-3.0
 >
 > 基于 [tRPC-Agent-Go v1.10.0](https://github.com/trpc-group/trpc-agent-go) · [tRPC-MCP-Go v0.0.16](https://github.com/trpc-group/trpc-mcp-go) · [tRPC-A2A-Go v0.2.5](https://github.com/trpc-group/trpc-a2a-go) · [CortexDB v2.25.0](https://github.com/liliang-cn/cortexdb)
 

@@ -283,7 +283,7 @@ func (p *Packer) packZIM(_ context.Context, sourceDir, outputPath string) (*Resu
 		packer.AddRedirect('W', "mainPage", "Main Page", 'C', mainPageURL)
 	}
 
-	// --- Rich ZIM metadata (kage-compatible). ---
+	// --- Rich ZIM metadata. ---
 
 	// Title: custom override > extracted from main page > app name.
 	zimTitle := p.opts.Title

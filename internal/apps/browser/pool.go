@@ -38,39 +38,45 @@ type Pool struct {
 // PoolOptions configures the browser pool.
 type PoolOptions struct {
 	Headless      bool
-	Workers       int
+	Workers       int           // Page rendering goroutines.
+	BrowserPages  int           // Chrome tab pool size (0 = use Workers).
 	Settle        time.Duration
 	RenderTimeout time.Duration
 	Scroll        bool
-	Stealth       bool // Inject anti-detection script before page loads.
-	ChromePath    string
+	Stealth       bool           // Inject anti-detection script before page loads.
+	ChromePath    string         // Path to Chrome executable (empty=auto-detect).
+	ProfileDir    string         // Chrome user-data-dir for persistent profile.
 }
 
-// DefaultPoolOptions returns reasonable defaults.
+// DefaultPoolOptions returns anti-bot-optimised defaults.
 func DefaultPoolOptions() PoolOptions {
 	return PoolOptions{
-		Headless:      true,
+		Headless:      true, // Headless by default.
 		Workers:       4,
 		Settle:        1500 * time.Millisecond,
 		RenderTimeout: 60 * time.Second,
 		Scroll:        false,
-		Stealth:       false,
+		Stealth:       true, // Anti-detection active by default.
 		ChromePath:    "",
 	}
 }
 
 // RenderResult holds the output of a single page render.
 type RenderResult struct {
-	HTML        string
-	Title       string
-	FinalURL    string
-	ContentType string
+	HTML                string
+	Title               string
+	FinalURL            string
+	ContentType         string
+	CloudflareClearance string // cf_clearance cookie value (Cloudflare bypass token)
 }
 
 // NewPool creates a new browser pool.
 func NewPool(opts PoolOptions) *Pool {
 	if opts.Workers <= 0 {
 		opts.Workers = 4
+	}
+	if opts.BrowserPages <= 0 {
+		opts.BrowserPages = opts.Workers
 	}
 	if opts.Settle <= 0 {
 		opts.Settle = 1500 * time.Millisecond
@@ -81,7 +87,7 @@ func NewPool(opts PoolOptions) *Pool {
 
 	return &Pool{
 		opts: opts,
-		sem:  make(chan struct{}, opts.Workers),
+		sem:  make(chan struct{}, opts.BrowserPages),
 	}
 }
 
@@ -139,13 +145,32 @@ func (p *Pool) initBrowser() {
 			allocOpts = append(allocOpts, chromedp.ExecPath(chromePath))
 		}
 
+		// Persistent Chrome profile: cookies, localStorage survive runs.
+		// Combined with non-headless mode, this allows Cloudflare
+		// Turnstile to be solved once manually and reused.
+		if p.opts.ProfileDir != "" {
+			allocOpts = append(allocOpts,
+				chromedp.UserDataDir(p.opts.ProfileDir))
+			fmt.Fprintf(os.Stderr,
+				"[wukong/browser] Chrome profile: %s\n", p.opts.ProfileDir)
+		}
+
+		// Non-headless indicator.
+		if !p.opts.Headless {
+			fmt.Fprintf(os.Stderr,
+				"[wukong/browser] starting visible Chrome "+
+					"(non-headless mode)\n")
+		} else {
+			fmt.Fprintf(os.Stderr,
+				"[wukong/browser] starting headless Chrome...\n")
+		}
+
 		// Create allocator context → browser context chain.
 		p.allocCtx, p.allocCancel = chromedp.NewExecAllocator(
 			context.Background(), allocOpts...)
 		p.browserCtx, p.browserCancel = chromedp.NewContext(p.allocCtx)
 
 		// Verify the browser launches by opening a blank page.
-		fmt.Fprintf(os.Stderr, "[wukong/browser] starting headless Chrome...\n")
 		if err := chromedp.Run(p.browserCtx, chromedp.Navigate("about:blank")); err != nil {
 			p.initErr = fmt.Errorf("browser startup failed: %w\n\n"+
 				"Chrome/Chromium is required for website cloning.\n"+
@@ -241,11 +266,32 @@ func (p *Pool) Render(ctx context.Context, rawURL string) (*RenderResult, error)
 		return nil, fmt.Errorf("snapshot: %w", err)
 	}
 
+	// Extract cf_clearance cookie — the Cloudflare bypass token.
+	// Once obtained, this cookie allows all subsequent requests (assets,
+	// sub-pages) to skip Cloudflare challenges entirely for its TTL.
+	var cfClearance string
+	_ = chromedp.Run(tabCtx,
+		chromedp.ActionFunc(func(ctx context.Context) error {
+			cookies, cErr := network.GetCookies().Do(ctx)
+			if cErr != nil {
+				return nil
+			}
+			for _, c := range cookies {
+				if c.Name == "cf_clearance" {
+					cfClearance = c.Value
+					break
+				}
+			}
+			return nil
+		}),
+	)
+
 	return &RenderResult{
-		HTML:        htmlContent,
-		Title:       title,
-		FinalURL:    finalURL,
-		ContentType: contentType,
+		HTML:                htmlContent,
+		Title:               title,
+		FinalURL:            finalURL,
+		ContentType:         contentType,
+		CloudflareClearance: cfClearance,
 	}, nil
 }
 
@@ -301,23 +347,30 @@ func (p *Pool) waitForNetworkSettle(tabCtx context.Context) error {
 }
 
 // autoScroll scrolls to the bottom to trigger lazy loading, then back to top.
+// Recalculates scrollHeight on each step so dynamically inserted content
+// (images, infinite-scroll lists) is not missed.
 func (p *Pool) autoScroll(tabCtx context.Context) {
-	// Use a short timeout; scrolling is best-effort.
 	scrollCtx, cancel := context.WithTimeout(tabCtx, 5*time.Second)
 	defer cancel()
 
 	chromedp.Run(scrollCtx,
 		chromedp.Evaluate(`(function() {
-			var h = document.body.scrollHeight;
 			var s = window.innerHeight;
 			var pos = 0;
-			function step() {
+			var maxSteps = 50;
+			var step = 0;
+			function scrollNext() {
+				// Re-read height each step (lazy images may add height).
+				var h = document.body.scrollHeight;
 				pos += s;
-				if (pos >= h) { window.scrollTo(0,0); return; }
+				if (pos >= h || step++ >= maxSteps) {
+					window.scrollTo(0, 0);
+					return;
+				}
 				window.scrollTo(0, pos);
-				setTimeout(step, 300);
+				setTimeout(scrollNext, 300);
 			}
-			step();
+			scrollNext();
 		})()`, nil),
 	)
 }

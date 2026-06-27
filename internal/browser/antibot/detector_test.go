@@ -168,3 +168,62 @@ func TestShouldRetry(t *testing.T) {
 		t.Error("ShouldRetry(ReasonEmpty) = true, want false")
 	}
 }
+
+func TestDetectDOM_Turnstile(t *testing.T) {
+	tests := []struct {
+		name   string
+		html   string
+		reason BlockReason
+	}{
+		{
+			"Cloudflare Turnstile script",
+			`<script src="https://challenges.cloudflare.com/turnstile/v0/api.js"></script>`,
+			ReasonCloudflare,
+		},
+		{
+			"Cloudflare challenge page",
+			`<meta http-equiv="Content-Security-Policy" content="script-src 'nonce-abc' https://challenges.cloudflare.com">`,
+			ReasonCloudflare,
+		},
+		{
+			"cf-turnstile div",
+			`<div class="cf-turnstile" data-sitekey="..."></div>`,
+			ReasonCloudflare,
+		},
+		{
+			"__cf_chl cookie marker",
+			`<script>var __cf_chl_opt={cHash:'abc'};</script>`,
+			ReasonCloudflare,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reason, desc := DetectDOM(tt.html)
+			if reason != tt.reason {
+				t.Errorf("DetectDOM() = %s (desc=%q), want %s",
+					reason, desc, tt.reason)
+			}
+		})
+	}
+}
+
+func TestHasCloudflareHeaders(t *testing.T) {
+	h := http.Header{}
+	if HasCloudflareHeaders(h) {
+		t.Error("empty headers should not match")
+	}
+	h.Set("cf-ray", "abc123")
+	if !HasCloudflareHeaders(h) {
+		t.Error("cf-ray header should match")
+	}
+}
+
+func TestHasTurnstileMarkers(t *testing.T) {
+	if HasTurnstileMarkers("normal html") {
+		t.Error("normal html should not match")
+	}
+	if !HasTurnstileMarkers(
+		"<script src=\"https://challenges.cloudflare.com/turnstile/v0/api.js\">") {
+		t.Error("turnstile url should match")
+	}
+}

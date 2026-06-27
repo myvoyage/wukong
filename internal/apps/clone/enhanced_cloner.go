@@ -8,7 +8,9 @@ package clone
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"os"
@@ -73,6 +75,11 @@ type EnhancedClonerOptions struct {
 	// AssetWorkers is the number of concurrent asset downloaders.
 	AssetWorkers int
 
+	// BrowserPages is the Chrome tab pool size (0 = same as Workers).
+	// Separate from Workers to allow different rendering concurrency
+	// vs browser resource usage.
+	BrowserPages int
+
 	// RespectRobots controls whether to obey robots.txt rules.
 	RespectRobots bool
 
@@ -84,6 +91,11 @@ type EnhancedClonerOptions struct {
 
 	// EnableResume saves frontier state for resuming interrupted crawls.
 	EnableResume bool
+
+	// Persist controls whether frontier state is written to disk on
+	// completion (default true). When false, state exists only in memory
+	// during the run — useful for privacy-sensitive or one-shot clones.
+	Persist bool
 
 	// DedupContent enables SHA-256 content deduplication with hard links.
 	DedupContent bool
@@ -101,8 +113,13 @@ type EnhancedClonerOptions struct {
 	// stale. Only used when Incremental is true. Default is 24 hours.
 	CacheMaxAge time.Duration
 
-	// Timeout is the per-page rendering timeout.
+	// Timeout is the per-page HTTP request timeout.
 	Timeout time.Duration
+
+	// RenderTimeout is the hard timeout for a single page render.
+	// Default is 30s. Separate from Timeout to allow generous HTTP
+	// timeouts without blocking slow-rendering pages indefinitely.
+	RenderTimeout time.Duration
 
 	// Settle is the network-idle quiet period before snapshotting the DOM.
 	// Default is 1500ms.
@@ -110,6 +127,17 @@ type EnhancedClonerOptions struct {
 
 	// ChromePath is the path to the Chrome/Chromium executable.
 	ChromePath string
+
+	// ChromeProfile is the Chrome user-data-dir for persistent browser
+	// profile. Cookies, localStorage, and solved Cloudflare challenges
+	// are saved between runs. Combine with Headless=false for Turnstile.
+	ChromeProfile string
+
+	// Headless controls headless mode (default true). Set to false to
+	// show a visible Chrome window — essential for solving interactive
+	// challenges like Cloudflare Turnstile once, then reusing the
+	// solved session via ChromeProfile.
+	Headless bool
 
 	// UserAgent is the User-Agent header for HTTP requests.
 	UserAgent string
@@ -151,15 +179,23 @@ type EnhancedClonerOptions struct {
 // links in the cloned output.
 func DefaultSkipAssetExts() map[string]bool {
 	return map[string]bool{
+		// Video
 		".mp4": true, ".m4v": true, ".webm": true, ".avi": true,
 		".mov": true, ".mkv": true, ".wmv": true, ".flv": true,
+		".m3u8": true, ".ts": true,
+		// Audio
 		".mp3": true, ".wav": true, ".ogg": true, ".flac": true,
-		".aac": true, ".m4a": true, ".wma": true,
+		".aac": true, ".m4a": true, ".wma": true, ".oga": true,
+		// Documents
 		".pdf": true, ".doc": true, ".docx": true, ".xls": true,
 		".xlsx": true, ".ppt": true, ".pptx": true,
+		// Archives
 		".zip": true, ".tar": true, ".gz": true, ".bz2": true,
-		".7z": true, ".rar": true, ".dmg": true, ".exe": true,
-		".msi": true, ".apk": true, ".iso": true,
+		".7z": true, ".rar": true, ".tgz": true, ".xz": true,
+		".dmg": true, ".iso": true,
+		// Installers / packages
+		".exe": true, ".msi": true, ".apk": true,
+		".pkg": true, ".deb": true, ".rpm": true, ".appimage": true,
 	}
 }
 
@@ -167,12 +203,15 @@ func DefaultSkipAssetExts() map[string]bool {
 func DefaultEnhancedOptions() EnhancedClonerOptions {
 	return EnhancedClonerOptions{
 		Workers:         4,
-		AssetWorkers:    4,
+		AssetWorkers:    8,
+		BrowserPages:    4,
 		Timeout:         60 * time.Second,
+		RenderTimeout:   30 * time.Second,
 		Settle:          1500 * time.Millisecond,
 		Traversal:       TraversalBFS,
 		RespectRobots:   true,
 		EnableResume:    true,
+		Persist:         true,
 		DedupContent:    true,
 		MobileReadable:  true,
 		AssetSameDomain: true,
@@ -182,7 +221,12 @@ func DefaultEnhancedOptions() EnhancedClonerOptions {
 		AntibotAutoEscalate: true,
 		Incremental:         false,
 		CacheMaxAge:         24 * time.Hour,
-		UserAgent:           "Mozilla/5.0 (compatible; Wukong-Cloner/2.0)",
+		Headless:            true,   // Default: headless Chrome.
+		Stealth:             true,   // Default: anti-detection active.
+		ChromeProfile:       "./wukong_chrome_profile",
+		UserAgent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) " +
+			"AppleWebKit/537.36 (KHTML, like Gecko) " +
+			"Chrome/124.0.0.0 Safari/537.36",
 	}
 }
 
@@ -219,6 +263,16 @@ type EnhancedCloner struct {
 
 	// Anti-bot detection and auto-escalation engine.
 	antibot *antibot.Engine
+
+	// preflightTurnstile is set true when the seed URL returns a Cloudflare
+	// Turnstile challenge page — a JS-interactive challenge that headless
+	// Chrome cannot pass. When true, the retry loop is skipped.
+	preflightTurnstile bool
+
+	// cfClearance is the Cloudflare bypass token extracted from Chrome
+	// after a successful page render. When present, all subsequent
+	// HTTP requests (preflight, assets) include it to skip challenges.
+	cfClearance string
 
 	// Page and asset job queues.
 	pageJobs  chan pageJob
@@ -275,7 +329,9 @@ func NewEnhancedCloner(opts EnhancedClonerOptions) *EnhancedCloner {
 		opts.Timeout = 60 * time.Second
 	}
 	if opts.UserAgent == "" {
-		opts.UserAgent = "Mozilla/5.0 (compatible; Wukong-Cloner/2.0)"
+		opts.UserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) " +
+			"AppleWebKit/537.36 (KHTML, like Gecko) " +
+			"Chrome/124.0.0.0 Safari/537.36"
 	}
 
 	dl := DefaultAssetDownloader()
@@ -312,6 +368,12 @@ func (ec *EnhancedCloner) Clone(ctx context.Context, seedURL string) (*Result, e
 	ec.scheme = parsedURL.Scheme
 	ec.host = parsedURL.Host
 	ec.seedURL = seedURL
+
+	// Pre-flight Cloudflare detection.
+	// Before starting headless Chrome, check if the site uses Cloudflare
+	// anti-bot protection. If so, enable Stealth pre-emptively so the
+	// first page load is already stealth-protected.
+	ec.preflightCloudflareCheck()
 
 	// Set up output directory.
 	outputDir := ec.opts.OutputDir
@@ -369,6 +431,10 @@ func (ec *EnhancedCloner) Clone(ctx context.Context, seedURL string) (*Result, e
 	// Initialize HTTP client (with cookie jar if session is active).
 	if cloneSess != nil {
 		ec.httpClient = cloneSess.HTTPClient()
+		// Share the cookie-jar-equipped client with the asset downloader
+		// so authenticated assets (behind login walls) are also fetched
+		// with the user's session cookies.
+		ec.assetDownloader.Client = cloneSess.HTTPClient()
 	} else {
 		ec.httpClient = &http.Client{
 			Timeout: 60 * time.Second,
@@ -410,13 +476,15 @@ func (ec *EnhancedCloner) Clone(ctx context.Context, seedURL string) (*Result, e
 
 	// Create browser pool.
 	pool := browser.NewPool(browser.PoolOptions{
-		Headless:      true,
+		Headless:      ec.opts.Headless,
 		Workers:       ec.opts.Workers,
-		RenderTimeout: ec.opts.Timeout,
+		BrowserPages:  ec.opts.BrowserPages,
+		RenderTimeout: ec.opts.RenderTimeout,
 		Settle:        ec.opts.Settle,
 		Scroll:        ec.opts.Scroll,
 		Stealth:       ec.opts.Stealth,
 		ChromePath:    ec.opts.ChromePath,
+		ProfileDir:    ec.opts.ChromeProfile,
 	})
 	ec.browserPool = pool
 	defer pool.Close()
@@ -493,8 +561,8 @@ func (ec *EnhancedCloner) Clone(ctx context.Context, seedURL string) (*Result, e
 		}
 	}
 
-	// Save frontier state.
-	if ec.opts.EnableResume {
+	// Save frontier state (only if both resume AND persist are enabled).
+	if ec.opts.EnableResume && ec.opts.Persist {
 		statePath := frontierStatePath(outputDir)
 		if err := ec.front.save(statePath); err != nil {
 			// Non-fatal.
@@ -649,6 +717,14 @@ func (ec *EnhancedCloner) processPage(ctx context.Context, pageURL string, depth
 	// Render page in headless Chrome.
 	renderResult, err := ec.browserPool.Render(ctx, pageURL)
 	if err != nil {
+		// Non-HTML resource? Route to asset downloader instead of failing.
+		if _, ok := errors.AsType[*browser.ErrNotHTML](err); ok {
+			ec.wg.Add(1)
+			ec.assetJobs <- assetJob{url: pageURL}
+			ec.front.markVisited(PageKey(ec.host, pageURL))
+			return result
+		}
+
 		// Check if the error indicates anti-bot blocking.
 		if reason, _ := ec.antibot.CheckError(err); reason != antibot.ReasonNone {
 			retry, delay, _, msg := ec.antibot.Escalate(
@@ -671,11 +747,39 @@ func (ec *EnhancedCloner) processPage(ctx context.Context, pageURL string, depth
 		return result
 	}
 
+	// Extract Cloudflare bypass token (cf_clearance cookie) from Chrome.
+	// If obtained, all subsequent HTTP requests include it to skip
+	// Cloudflare challenges for their TTL (~30 min).
+	if renderResult.CloudflareClearance != "" {
+		ec.cfClearance = renderResult.CloudflareClearance
+		ec.assetDownloader.cfClearance = renderResult.CloudflareClearance
+		fmt.Fprintf(os.Stderr,
+			"[wukong/antibot] cf_clearance obtained — "+
+				"Cloudflare bypass active for subsequent requests\n")
+	}
+
 	// Detect anti-bot patterns in the rendered page.
 	abReason, abDesc := ec.antibot.CheckResponse(
 		200, nil, renderResult.HTML)
 	if abReason != antibot.ReasonNone {
 		fmt.Fprintf(os.Stderr, "[wukong/antibot] %s at %s\n", abDesc, pageURL)
+
+		// Cloudflare Turnstile: headless Chrome cannot solve
+		// interactive JS challenges. Skip the retry loop.
+		if abReason == antibot.ReasonCloudflare {
+			ec.opts.AntibotAutoEscalate = false
+			msg := "Cloudflare Turnstile blocked — headless " +
+				"Chrome cannot pass interactive JS challenges."
+			if ec.cfClearance == "" {
+				msg += " Run: wukong apps clone URL " +
+					"--no-headless --chrome-profile ./cf_data " +
+					"(manually solve once, then re-clone with " +
+					"--chrome-profile ./cf_data to reuse session)"
+			}
+			result.Error = msg
+			return result
+		}
+
 		retry, delay, _, msg := ec.antibot.Escalate(
 			pageURL, abReason, 200)
 		ec.applyAntiBotLevel()
@@ -1100,6 +1204,102 @@ func (ec *EnhancedCloner) shouldCrawlMore(depth int) bool {
 		}
 	}
 	return true
+}
+
+// applyAntiBotLevel applies the current antibot escalation level to the
+// browser pool. When the antibot engine escalates to Level 2+ (Stealth),
+// this dynamically injects anti-detection scripts into the running browser
+// so all subsequent page loads are stealth-enabled without a restart.
+// preflightCloudflareCheck performs a fast HEAD request to the seed URL
+// before Chrome is started. If Cloudflare headers are detected (cf-ray,
+// cf-chl-bypass, etc.), it automatically enables Stealth mode and sets the
+// antibot baseline to LevelStealth so the very first page load is already
+// stealth-protected — avoiding the "detect → escalate → retry" cycle that
+// wastes the first 1-2 page loads.
+//
+// Uses its own HTTP client because ec.httpClient may not be initialised yet.
+func (ec *EnhancedCloner) preflightCloudflareCheck() {
+	if !ec.opts.AntibotEnabled || ec.opts.Stealth {
+		return // Already enabled or disabled.
+	}
+
+	client := &http.Client{Timeout: 10 * time.Second}
+
+	// Use GET — Cloudflare may return 0/-1 ContentLength on HEAD.
+	req, err := http.NewRequest("GET", ec.seedURL, nil)
+	if err != nil {
+		return
+	}
+	req.Header.Set("User-Agent", ec.opts.UserAgent)
+	ec.setBrowserHeaders(req)
+
+	// If we already have a cf_clearance from a previous Chrome render,
+	// include it so the preflight bypasses Cloudflare challenges.
+	if ec.cfClearance != "" {
+		req.AddCookie(&http.Cookie{
+			Name:  "cf_clearance",
+			Value: ec.cfClearance,
+		})
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return
+	}
+	defer resp.Body.Close()
+
+	if !antibot.HasCloudflareHeaders(resp.Header) {
+		return
+	}
+
+	// Cloudflare detected BEFORE Chrome starts — enable Stealth.
+	ec.opts.Stealth = true
+
+	// Read response body to check for Turnstile markers.
+	body, rErr := io.ReadAll(io.LimitReader(resp.Body, 8192))
+	if rErr != nil || len(body) == 0 {
+		fmt.Fprintf(os.Stderr,
+			"[wukong/antibot] Cloudflare detected on %s — "+
+				"stealth enabled pre-emptively\n", ec.host)
+		return
+	}
+
+	if antibot.HasTurnstileMarkers(string(body)) {
+		// Turnstile is a JS-interactive challenge. Headless Chrome
+		// cannot solve it. Disable auto-escalation NOW so we don't
+		// waste ~10s on doomed retries.
+		ec.opts.AntibotAutoEscalate = false
+		ec.preflightTurnstile = true
+		fmt.Fprintf(os.Stderr,
+			"[wukong/antibot] Cloudflare Turnstile detected "+
+				"on %s — headless Chrome cannot solve "+
+				"interactive challenges. Stealth enabled, "+
+				"auto-retry disabled (Tip: use a non-"+
+				"Cloudflare mirror or real browser profile).\n",
+			ec.host)
+		return
+	}
+
+	fmt.Fprintf(os.Stderr,
+		"[wukong/antibot] Cloudflare detected on %s — stealth "+
+			"enabled pre-emptively\n", ec.host)
+}
+
+// setBrowserHeaders adds realistic Chrome headers (sec-ch-ua, sec-fetch-*)
+// to an HTTP request. Cloudflare L3 detection checks these to distinguish
+// browsers from simple HTTP clients. Without them, the preflight GET and
+// asset requests look artificial.
+func (ec *EnhancedCloner) setBrowserHeaders(req *http.Request) {
+	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8")
+	req.Header.Set("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8,ja;q=0.7")
+	req.Header.Set("sec-ch-ua", `"Chromium";v="130", "Google Chrome";v="130", "Not?A_Brand";v="99"`)
+	req.Header.Set("sec-ch-ua-mobile", "?0")
+	req.Header.Set("sec-ch-ua-platform", `"Windows"`)
+	req.Header.Set("sec-fetch-site", "none")
+	req.Header.Set("sec-fetch-mode", "navigate")
+	req.Header.Set("sec-fetch-dest", "document")
+	req.Header.Set("sec-fetch-user", "?1")
+	req.Header.Set("upgrade-insecure-requests", "1")
 }
 
 // applyAntiBotLevel applies the current antibot escalation level to the

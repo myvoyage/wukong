@@ -30,7 +30,7 @@ type Options struct {
 	IncludeAssets bool
 	EmbedFonts    bool
 
-	// ZIM metadata (kage-compatible).
+	// ZIM metadata.
 	Language   string // ISO 639-3 language code (default "eng").
 	Creator    string // Archive creator (default "Wukong").
 	Publisher  string // Archive publisher.

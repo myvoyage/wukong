@@ -49,7 +49,6 @@ var captchaKeywords = []string{
 	"are you a human",
 	"please verify",
 	"security check",
-	"challenge",
 	"cf-challenge",
 	"cf_challenge",
 	"cf-browser-verification",
@@ -63,6 +62,16 @@ var captchaKeywords = []string{
 	"browser check",
 	"automated access",
 	"suspicious activity",
+}
+
+// turnstileIndicators are strings uniquely identifying Cloudflare Turnstile.
+var turnstileIndicators = []string{
+	"challenges.cloudflare.com",
+	"challenges.cloudflare.com/turnstile",
+	"cf-turnstile",
+	"turnstile",
+	"__cf_chl",
+	"cf_chl_",
 }
 
 // cloudflareHeaders are response headers set by Cloudflare anti-bot.
@@ -111,15 +120,43 @@ func DetectHTTP(statusCode int, headers http.Header) (BlockReason, string) {
 	for _, h := range cloudflareHeaders {
 		if headers.Get(h) != "" {
 			return ReasonCloudflare,
-				"Cloudflare headers detected — site uses anti-bot"
+				"Cloudflare headers detected on response — " +
+					"site uses anti-bot protection"
 		}
 	}
 
 	return ReasonNone, ""
 }
 
+// HasCloudflareHeaders returns true if the HTTP response contains any
+// Cloudflare-specific header. This is a fast pre-flight check that can
+// run before Chrome is started so stealth measures are in place from
+// the very first page load.
+func HasCloudflareHeaders(headers http.Header) bool {
+	for _, h := range cloudflareHeaders {
+		if headers.Get(h) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// HasTurnstileMarkers returns true if the HTML contains Cloudflare
+// Turnstile challenge indicators. Turnstile requires JS execution to
+// pass; stealth scripts alone may not be sufficient.
+func HasTurnstileMarkers(html string) bool {
+	lower := strings.ToLower(html)
+	for _, kw := range turnstileIndicators {
+		if strings.Contains(lower, kw) {
+			return true
+		}
+	}
+	return false
+}
+
 // DetectDOM analyses HTML content for anti-bot / CAPTCHA indicators.
-// Returns the detected reason and a snippet of the matching text.
+// Turnstile (Cloudflare) challenges are checked first to produce the most
+// specific reason, followed by generic CAPTCHA keywords.
 func DetectDOM(html string) (BlockReason, string) {
 	if len(html) == 0 {
 		return ReasonEmpty, "empty response body"
@@ -127,7 +164,7 @@ func DetectDOM(html string) (BlockReason, string) {
 
 	lower := strings.ToLower(html)
 
-	// Check for very short pages (likely error/block pages).
+	// Short blocked pages.
 	if len(html) < 200 {
 		if strings.Contains(lower, "forbidden") ||
 			strings.Contains(lower, "denied") {
@@ -135,14 +172,26 @@ func DetectDOM(html string) (BlockReason, string) {
 		}
 	}
 
-	// Check for CAPTCHA / anti-bot keywords.
+	// === Cloudflare Turnstile: check BEFORE generic keywords. ===
+	// Turnstile is a specific Cloudflare product — produce a clear,
+	// actionable message rather than a raw HTML snippet.
+	for _, kw := range turnstileIndicators {
+		if strings.Contains(lower, kw) {
+			return ReasonCloudflare,
+				"Cloudflare Turnstile challenge detected — " +
+					"this site requires browser-interactive challenge passes " +
+					"(consider running with --stealth or " +
+					"--no-antibot-auto to skip retries)"
+		}
+	}
+
+	// Generic CAPTCHA / anti-bot keywords.
 	for _, kw := range captchaKeywords {
 		idx := strings.Index(lower, kw)
 		if idx >= 0 {
-			// Extract a snippet around the keyword.
-			snippet := extractSnippet(html, idx, len(kw), 80)
+			snippet := extractSnippet(html, idx, len(kw), 60)
 			return ReasonCaptcha,
-				"anti-bot page detected: " + snippet
+				"anti-bot page: " + snippet
 		}
 	}
 

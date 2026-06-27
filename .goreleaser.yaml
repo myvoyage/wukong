@@ -1,0 +1,200 @@
+# GoReleaser configuration for Wukong multi-platform release automation.
+# Builds are produced for:
+#   - Linux:   amd64, arm64
+#   - macOS:   amd64, arm64 (Apple Silicon)
+#   - Windows: amd64, arm64
+#
+# Usage:
+#   goreleaser release --clean       # full release with tags
+#   goreleaser build --single-target # local test
+#   goreleaser release --snapshot    # test without publishing
+
+version: 2
+
+project_name: wukong
+
+before:
+  hooks:
+    - go mod tidy
+    - go generate ./...
+
+builds:
+  # ===== Linux =====
+  - id: linux-amd64
+    goos: [linux]
+    goarch: [amd64]
+    main: ./cmd/wukong
+    binary: wukong
+    ldflags:
+      - -s -w -X main.version={{.Version}} -X main.commit={{.Commit}} -X main.date={{.Date}}
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    mod_timestamp: "{{ .CommitTimestamp }}"
+
+  - id: linux-arm64
+    goos: [linux]
+    goarch: [arm64]
+    main: ./cmd/wukong
+    binary: wukong
+    ldflags:
+      - -s -w -X main.version={{.Version}} -X main.commit={{.Commit}} -X main.date={{.Date}}
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    mod_timestamp: "{{ .CommitTimestamp }}"
+
+  # ===== macOS =====
+  - id: darwin-amd64
+    goos: [darwin]
+    goarch: [amd64]
+    main: ./cmd/wukong
+    binary: wukong
+    ldflags:
+      - -s -w -X main.version={{.Version}} -X main.commit={{.Commit}} -X main.date={{.Date}}
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    mod_timestamp: "{{ .CommitTimestamp }}"
+
+  - id: darwin-arm64
+    goos: [darwin]
+    goarch: [arm64]
+    main: ./cmd/wukong
+    binary: wukong
+    ldflags:
+      - -s -w -X main.version={{.Version}} -X main.commit={{.Commit}} -X main.date={{.Date}}
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    mod_timestamp: "{{ .CommitTimestamp }}"
+
+  # ===== Windows =====
+  - id: windows-amd64
+    goos: [windows]
+    goarch: [amd64]
+    main: ./cmd/wukong
+    binary: wukong
+    ldflags:
+      - -s -w -X main.version={{.Version}} -X main.commit={{.Commit}} -X main.date={{.Date}}
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    mod_timestamp: "{{ .CommitTimestamp }}"
+
+  - id: windows-arm64
+    goos: [windows]
+    goarch: [arm64]
+    main: ./cmd/wukong
+    binary: wukong
+    ldflags:
+      - -s -w -X main.version={{.Version}} -X main.commit={{.Commit}} -X main.date={{.Date}}
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    mod_timestamp: "{{ .CommitTimestamp }}"
+
+archives:
+  - id: default
+    formats: [tar.xz, zip]
+    name_template: >-
+      {{ .ProjectName }}_
+      {{- .Version }}_
+      {{- .Os }}_
+      {{- .Arch }}
+    wrap_in_directory: true
+    files:
+      - README.md
+      - LICENSE
+      - CHANGELOG.md
+      - config.yaml
+      - docs/*
+
+checksum:
+  name_template: "{{ .ProjectName }}_{{ .Version }}_checksums.txt"
+  algorithm: sha256
+
+snapshot:
+  version_template: "{{ .Version }}-dev-{{ .ShortCommit }}"
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^Merge pull request"
+      - "^Merge branch"
+      - "^docs:"
+      - "^test:"
+      - "^ci:"
+    include:
+      - "^.*"
+
+# ===== Homebrew Tap =====
+brews:
+  - name: wukong
+    repository:
+      owner: km269
+      name: homebrew-tap
+      branch: main
+    homepage: "https://github.com/km269/wukong"
+    description: "Local-first extensible AI agent platform with website cloning"
+    license: "MIT"
+    install: |
+      bin.install "wukong"
+    test: |
+      system "#{bin}/wukong", "--version"
+
+# ===== Scoop (Windows) =====
+scoops:
+  - name: wukong
+    repository:
+      owner: km269
+      name: scoop-bucket
+      branch: main
+    homepage: "https://github.com/km269/wukong"
+    description: "Local-first extensible AI agent platform"
+    license: "MIT"
+
+# ===== Docker images =====
+dockers:
+  - image_templates:
+      - "ghcr.io/km269/wukong:{{ .Version }}-amd64"
+      - "ghcr.io/km269/wukong:latest-amd64"
+    dockerfile: Dockerfile
+    goos: linux
+    goarch: amd64
+    build_flag_templates:
+      - "--platform=linux/amd64"
+      - "--label=org.opencontainers.image.title={{ .ProjectName }}"
+      - "--label=org.opencontainers.image.version={{ .Version }}"
+      - "--label=org.opencontainers.image.revision={{ .FullCommit }}"
+      - "--label=org.opencontainers.image.created={{ .Date }}"
+
+  - image_templates:
+      - "ghcr.io/km269/wukong:{{ .Version }}-arm64"
+      - "ghcr.io/km269/wukong:latest-arm64"
+    dockerfile: Dockerfile
+    goos: linux
+    goarch: arm64
+    build_flag_templates:
+      - "--platform=linux/arm64"
+      - "--label=org.opencontainers.image.title={{ .ProjectName }}"
+      - "--label=org.opencontainers.image.version={{ .Version }}"
+      - "--label=org.opencontainers.image.revision={{ .FullCommit }}"
+      - "--label=org.opencontainers.image.created={{ .Date }}"
+
+docker_manifests:
+  - name_template: "ghcr.io/km269/wukong:{{ .Version }}"
+    image_templates:
+      - "ghcr.io/km269/wukong:{{ .Version }}-amd64"
+      - "ghcr.io/km269/wukong:{{ .Version }}-arm64"
+  - name_template: "ghcr.io/km269/wukong:latest"
+    image_templates:
+      - "ghcr.io/km269/wukong:latest-amd64"
+      - "ghcr.io/km269/wukong:latest-arm64"

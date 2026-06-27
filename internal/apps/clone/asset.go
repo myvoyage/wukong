@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -20,10 +21,11 @@ import (
 // It is intentionally separate from the Chrome rendering pool because
 // public assets rarely need a real browser engine.
 type AssetDownloader struct {
-	Client    *http.Client
-	UserAgent string
-	MaxBytes  int64  // 0 = no limit.
-	Retries   int    // 0 = no retries (single attempt).
+	Client       *http.Client
+	UserAgent    string
+	MaxBytes     int64  // 0 = no limit.
+	Retries      int    // 0 = no retries (single attempt).
+	cfClearance  string // Cloudflare bypass cookie (from Chrome render).
 }
 
 // DefaultAssetDownloader returns a downloader with sensible defaults.
@@ -99,7 +101,29 @@ func (d *AssetDownloader) tryDownload(ctx context.Context, assetURL string) (*Do
 		return nil, &DownloadError{URL: assetURL, Reason: "bad_request", Err: err}
 	}
 	req.Header.Set("User-Agent", d.UserAgent)
-	req.Header.Set("Accept", "*/*")
+	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8")
+	req.Header.Set("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8,ja;q=0.7")
+	// Realistic sec-* headers — Cloudflare L3 detection distinguishes
+	// browsers from simple HTTP clients by checking these exact headers.
+	req.Header.Set("sec-ch-ua", `"Chromium";v="130", "Google Chrome";v="130", "Not?A_Brand";v="99"`)
+	req.Header.Set("sec-ch-ua-mobile", "?0")
+	req.Header.Set("sec-ch-ua-platform", `"Windows"`)
+	req.Header.Set("sec-fetch-site", "same-origin")
+	req.Header.Set("sec-fetch-mode", "no-cors")
+	req.Header.Set("sec-fetch-dest", "image")
+	// Same-site Referer — sub-resource load context.
+	if u, err := url.Parse(assetURL); err == nil {
+		req.Header.Set("Referer", u.Scheme+"://"+u.Host+"/")
+	}
+
+	// Cloudflare bypass: if we have a cf_clearance cookie from Chrome,
+	// include it so asset requests skip challenges.
+	if d.cfClearance != "" {
+		req.AddCookie(&http.Cookie{
+			Name:  "cf_clearance",
+			Value: d.cfClearance,
+		})
+	}
 
 	resp, err := d.Client.Do(req)
 	if err != nil {

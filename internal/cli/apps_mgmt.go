@@ -3,6 +3,7 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -12,6 +13,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/km269/wukong/internal/apps"
+	"github.com/km269/wukong/internal/apps/server"
 	"github.com/km269/wukong/internal/config"
 	"github.com/km269/wukong/internal/util"
 )
@@ -31,6 +33,7 @@ Subcommands:
   create    Create a new app or use a template
   clone     Clone a website as an offline app
   pack      Package an app into a distributable format
+  view      Preview an app in the browser
   delete    Delete an app
   history   View version history
   export    Export an app to a single file`,
@@ -41,6 +44,7 @@ Subcommands:
 	cmd.AddCommand(newAppsCreateCmd())
 	cmd.AddCommand(newAppsCloneCmd())
 	cmd.AddCommand(newAppsPackCmd())
+	cmd.AddCommand(newAppsViewCmd())
 	cmd.AddCommand(newAppsDeleteCmd())
 	cmd.AddCommand(newAppsHistoryCmd())
 	cmd.AddCommand(newAppsExportCmd())
@@ -456,6 +460,54 @@ func runAppsHistory(cmd *cobra.Command, args []string) error {
 }
 
 // ==========================================================================
+// apps view — preview an app in the browser
+// ==========================================================================
+
+func newAppsViewCmd() *cobra.Command {
+	var (
+		configPath string
+		port       int
+	)
+
+	cmd := &cobra.Command{
+		Use:   "view <app-name>",
+		Short: "Preview a cloned/packaged app in the browser",
+		Long: `Start a local HTTP server and open the app in your default browser.
+
+Examples:
+  wukong apps view example.com
+  wukong apps view example.com --port 8800`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			name := args[0]
+
+			mgr, cleanup, err := createAppsManager(configPath)
+			if err != nil {
+				return err
+			}
+			defer cleanup()
+
+			app, ok := mgr.GetApp(name)
+			if !ok {
+				return fmt.Errorf("app %q not found", name)
+			}
+
+			serveDir := app.AppDir
+			if serveDir == "" {
+				serveDir = filepath.Dir(app.FilePath)
+			}
+
+			return previewApp(cmd.Context(), serveDir, port, name)
+		},
+	}
+
+	cmd.Flags().StringVarP(&configPath, "config", "c", "", "Path to config file")
+	cmd.Flags().IntVarP(&port, "port", "p", 0, "Port to listen on (0=auto-select)")
+
+	return cmd
+}
+
+// ==========================================================================
 // apps export
 // ==========================================================================
 
@@ -694,6 +746,7 @@ func newAppsCloneCmd() *cobra.Command {
 		subdomains          bool
 		scroll              bool
 		timeout             int
+		renderTimeout       int
 		settle              int
 		workers             int
 		assetWorkers        int
@@ -701,27 +754,31 @@ func newAppsCloneCmd() *cobra.Command {
 		refresh             bool
 		incremental         bool
 		chromePath          string
-		stealth             bool
 		assetSameDomain     bool
 		noSitemap           bool
 		noAntibot           bool
 		noAntibotAutoEsc    bool
 		cookieFile          string
+		chromeProfile       string
+		noHeadless          bool
+		noChromeProfile     bool
+		noStealth           bool
 	)
 
 	cmd := &cobra.Command{
 		Use:   "clone <url>",
 		Short: "Clone a website as an offline app",
-		Long: `Clone a website to a local directory with all JavaScript stripped out.
+		Long: `Clone a website to a local directory with JavaScript stripped out.
 Uses headless Chrome to render pages, downloads all assets,
 and creates a fully offline-browsable mirror.
+Stealth anti-detection and Chrome profile are enabled by default.
 
 Examples:
   wukong apps clone https://example.com
   wukong apps clone example.com --max-pages 50 --max-depth 2
   wukong apps clone example.com --subdomains --scroll
   wukong apps clone example.com --workers 8 --incremental
-  wukong apps clone example.com --stealth --traversal dfs`,
+  wukong apps clone example.com --traversal dfs`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			seedURL := args[0]
@@ -741,22 +798,22 @@ Examples:
 				Traversal:    traversal,
 				Subdomains:   subdomains,
 				Scroll:       scroll,
-				Timeout:      timeout,
-				Settle:       settle,
+				Timeout:       timeout,
+				RenderTimeout: renderTimeout,
+				Settle:        settle,
 				Workers:      workers,
 				AssetWorkers: assetWorkers,
 				Force:        force,
 				Refresh:      refresh,
 				ChromePath:   chromePath,
-				CookieFile:   cookieFile,
+				CookieFile:      cookieFile,
+				ChromeProfile:   chromeProfile,
+				NoChromeProfile: noChromeProfile,
+				NoStealth:       noStealth,
 			}
 			if incremental {
 				v := true
 				opts.Incremental = &v
-			}
-			if stealth {
-				v := true
-				opts.Stealth = &v
 			}
 			if noAntibot {
 				v := false
@@ -818,7 +875,8 @@ Examples:
 	cmd.Flags().StringVar(&traversal, "traversal", "", "Traversal strategy: bfs (default) or dfs")
 	cmd.Flags().BoolVar(&subdomains, "subdomains", false, "Include subdomains")
 	cmd.Flags().BoolVar(&scroll, "scroll", false, "Auto-scroll to trigger lazy loading")
-	cmd.Flags().IntVar(&timeout, "timeout", 0, "Page render timeout in seconds (default 60)")
+	cmd.Flags().IntVar(&timeout, "timeout", 0, "HTTP request timeout in seconds (default 60)")
+	cmd.Flags().IntVar(&renderTimeout, "render-timeout", 0, "Page render hard timeout in seconds (default 30)")
 	cmd.Flags().IntVar(&settle, "settle", 0, "Network idle settle time in ms (default 1500)")
 	cmd.Flags().IntVarP(&workers, "workers", "w", 0, "Concurrent page renderers (default 4)")
 	cmd.Flags().IntVar(&assetWorkers, "asset-workers", 0, "Concurrent asset downloaders (default same as workers)")
@@ -828,10 +886,38 @@ Examples:
 	cmd.Flags().BoolVar(&assetSameDomain, "asset-same-domain", false, "Only download assets from same domain")
 	cmd.Flags().BoolVar(&noSitemap, "no-sitemap", false, "Disable sitemap URL discovery")
 	cmd.Flags().StringVar(&chromePath, "chrome-path", "", "Path to Chrome/Chromium executable")
-	cmd.Flags().BoolVar(&stealth, "stealth", false, "Enable stealth mode (hide automation from anti-bot detection)")
 	cmd.Flags().BoolVar(&noAntibot, "no-antibot", false, "Disable auto anti-bot detection and escalation")
 	cmd.Flags().BoolVar(&noAntibotAutoEsc, "no-antibot-auto", false, "Detect blocks but skip auto-escalation")
 	cmd.Flags().StringVar(&cookieFile, "cookies", "", "Netscape-format cookie file for authenticated cloning")
+	cmd.Flags().StringVar(&chromeProfile, "chrome-profile", "", "Chrome user-data-dir (default ./wukong_chrome_profile)")
+	cmd.Flags().BoolVar(&noHeadless, "no-headless", false, "Show visible Chrome window (for manual Turnstile solving)")
+	cmd.Flags().BoolVar(&noChromeProfile, "no-chrome-profile", false, "Disable Chrome profile persistence")
+	cmd.Flags().BoolVar(&noStealth, "no-stealth", false, "Disable stealth anti-detection (on by default)")
 
 	return cmd
 }
+
+// previewApp starts a local HTTP server and opens the app in browser.
+func previewApp(ctx context.Context, serveDir string, port int, name string) error {
+	srv := server.NewServer(server.Config{
+		Port:    port,
+		RootDir: serveDir,
+		AppName: name,
+	})
+
+	addr, err := srv.StartAndWait(ctx)
+	if err != nil {
+		return fmt.Errorf("start preview server: %w", err)
+	}
+
+	fmt.Printf("  Preview: %s\n", addr)
+
+	if err := openBrowser(addr); err != nil {
+		fmt.Fprintf(os.Stderr, "  Warning: could not open browser: %v\n", err)
+	}
+
+	<-ctx.Done()
+	return srv.Stop()
+}
+
+

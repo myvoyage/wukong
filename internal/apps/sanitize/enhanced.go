@@ -50,7 +50,7 @@ type CleanReport struct {
 }
 
 // ---------------------------------------------------------------------------
-// Advanced DOM-level cleaning (kage-style).
+// Advanced DOM-level cleaning.
 // ---------------------------------------------------------------------------
 
 // CleanHTMLWithOptions removes JavaScript and unsafe content from HTML
@@ -134,6 +134,15 @@ func cleanTree(n *html.Node, opts CleanOptions, report *CleanReport) {
 					c = next
 					continue
 				}
+
+			// Unsafe elements — remove entirely for privacy/security.
+			// These can embed active content, initiate network requests,
+			// or alter the page context.
+			case atom.Iframe, atom.Embed, atom.Object,
+				atom.Applet, atom.Base:
+				n.RemoveChild(c)
+				c = next
+				continue
 			}
 
 			// Strip event handlers from retained elements.

@@ -1,8 +1,8 @@
 # Wukong 配置参考
 
-> **配置文件**: `config.yaml` | **加载器**: Viper + Cobra | **配置段**: 39 | **结构体**: 40+
+> **配置文件**: `config.yaml` | **加载器**: Viper + Cobra | **结构体**: 43 · ~310 字段
 >
-> Go: 1.26 | 文件: 212 `.go` | CLI: 28 顶层 + 55+ 子命令 | 定义: `internal/config/config.go`
+> Go: 1.26 | 文件: 221 `.go` (51 `_test.go`) | CLI: 28 顶层 + 55+ 子命令 | 定义: `internal/config/config.go`
 
 ---
 
@@ -317,12 +317,12 @@ wukong bench              # 模型性能基准
 | `graphflow` | `GraphFlowConfig` | 3 | cortex status |
 | `importflow` | `ImportFlowConfig` | 2 | cortex status |
 | `revision` | `RevisionConfig` | 11 | config show |
-| `browser` | `BrowserConfig` (含 Stealth) | 11 | — |
+| `browser` | `BrowserConfig` (含 Stealth) | 15 | — |
 | `visualiser` | `VisualiserConfig` | 4 | — |
 | `tutorial` | `TutorialConfig` | 2 | — |
 | `top_of_mind` | `TopOfMindConfig` | 3 | init |
 | `code_mode` | `CodeModeConfig` | 3 | — |
-| `apps` | `AppsConfig` + `CloneDefaults` | 15 | apps clone/pack/list |
+| `apps` | `AppsConfig` + `CloneDefaults` | 17 | apps clone/pack/list/view |
 | `ard` | `ARDConfig` | 5 | ard status/catalog |
 | `summon` | `SummonConfig` | 4 | — |
 | `skill` | `SkillConfig` | 4 | skill list/show |

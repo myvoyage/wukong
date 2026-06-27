@@ -47,14 +47,14 @@ func TestEscalatorAutoEscalate(t *testing.T) {
 		t.Errorf("expected level Aggressive, got %s", level)
 	}
 
-	// Fourth hit: already at max Aggressive, should stay.
+	// Fourth hit: MaxRetries exceeded (retry count 4 > 3), should backoff.
 	retry, _, level, _ = e.Check(
 		"https://example.com", ReasonForbidden, 403)
-	if !retry {
-		t.Fatal("expected retry at max level")
+	if retry {
+		t.Fatal("expected no retry when max retries exceeded")
 	}
-	if level != LevelAggressive {
-		t.Errorf("expected level Aggressive, got %s", level)
+	if level != LevelBackoff {
+		t.Errorf("expected level Backoff, got %s", level)
 	}
 }
 
@@ -99,6 +99,7 @@ func TestEscalatorReset(t *testing.T) {
 		AutoEscalate: true,
 		MaxLevel:     LevelAggressive,
 		MaxRetries:   3,
+		Cooldown:     10 * time.Millisecond,
 	})
 
 	e.Check("https://example.com", ReasonForbidden, 403)

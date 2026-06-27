@@ -198,6 +198,9 @@ func (m *Manager) CloneApp(ctx context.Context, seedURL string, opts CloneOption
 	if opts.Timeout > 0 {
 		eco.Timeout = time.Duration(opts.Timeout) * time.Second
 	}
+	if opts.RenderTimeout > 0 {
+		eco.RenderTimeout = time.Duration(opts.RenderTimeout) * time.Second
+	}
 	if opts.Settle > 0 {
 		eco.Settle = time.Duration(opts.Settle) * time.Millisecond
 	}
@@ -244,8 +247,17 @@ func (m *Manager) CloneApp(ctx context.Context, seedURL string, opts CloneOption
 	if opts.ChromePath != "" {
 		eco.ChromePath = opts.ChromePath
 	}
-	if opts.Stealth != nil {
-		eco.Stealth = *opts.Stealth
+	if opts.ChromeProfile != "" {
+		eco.ChromeProfile = opts.ChromeProfile
+	}
+	if opts.NoChromeProfile {
+		eco.ChromeProfile = ""
+	}
+	if opts.NoHeadless {
+		eco.Headless = false
+	}
+	if opts.NoStealth {
+		eco.Stealth = false
 	}
 	if opts.AntibotEnabled != nil {
 		eco.AntibotEnabled = *opts.AntibotEnabled
@@ -318,7 +330,8 @@ type CloneOptions struct {
 	Traversal      string // 遍历策略：bfs / dfs（空 = 默认bfs）
 	Subdomains     bool   // 是否包含子域名
 	Scroll         bool   // 是否滚动加载懒加载内容
-	Timeout        int    // 页面渲染超时（秒）
+	Timeout        int    // HTTP 请求超时（秒）
+	RenderTimeout  int    // 页面渲染硬超时（秒，默认30）
 	Settle         int    // 网络空闲等待时间（毫秒，1500 = 默认）
 	Workers        int    // 并发页面渲染线程数
 	AssetWorkers   int    // 并发资源下载线程数（0 = 与Workers相同）
@@ -331,8 +344,11 @@ type CloneOptions struct {
 	CrawlDelay     int    // 爬取延迟（毫秒，0 = 使用robots.txt设定）
 	Incremental    *bool  // 是否启用增量缓存（nil = 默认false）
 	CacheMaxAge    int    // 缓存最长有效时间（秒，默认86400）
-	ChromePath     string // Chrome 浏览器路径（空=自动检测）
-	Stealth              *bool  // Stealth 反检测模式（nil=默认false）
+	ChromePath       string // Chrome 浏览器路径（空=自动检测）
+	ChromeProfile    string // Chrome 用户数据目录（覆盖默认 ./wukong_chrome_profile）
+	NoHeadless       bool   // 禁用 headless 模式（显示可见窗口）
+	NoChromeProfile  bool   // 禁用 Chrome Profile（默认启用）
+	NoStealth        bool   // 禁用 Stealth 反检测（默认启用）
 	AntibotEnabled       *bool  // 自动反爬检测（nil=默认true）
 	AntibotAutoEscalate  *bool  // 自动升级隐身级别（nil=默认true）
 	CookieFile           string // Cookie文件路径 (Netscape格式, 用于登录态克隆)
