@@ -218,7 +218,7 @@ wukong
 
 ---
 
-## 12. 网站克隆系统 (Kage-inspired)
+## 12. 网站克隆系统 
 
 `internal/apps/clone/` (14 文件) — 完整网站离线镜像引擎
 
